@@ -1,0 +1,26 @@
+/* Attendance days picker – Odd/Even calendar panels for group creation */
+
+.adp{display:flex;flex-direction:column;gap:8px;margin-top:6px}
+.adp-panels{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.adp-panel{border:1px solid #d9e7e1;border-radius:8px;padding:10px;background:#fff}
+.adp-panel.odd{border-color:#1d7a4b33}
+.adp-panel.even{border-color:#b27a1d33}
+.adp-panel-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px}
+.adp-panel-title{font:700 12px 'Manrope',sans-serif}
+.adp-panel-title.odd{color:#1d7a4b}
+.adp-panel-title.even{color:#b27a1d}
+.adp-count{font-size:10px;color:#8ea9a0}
+.adp-cells{display:grid;grid-template-columns:repeat(6,1fr);gap:5px}
+.adp-cell{border:1px solid #d9e7e1;border-radius:6px;background:#fafcfa;color:#36594e;font:700 12px 'Manrope',sans-serif;padding:7px 0;cursor:pointer;min-width:0}
+.adp-cell:hover:not(:disabled){border-color:#4a988a}
+.adp-cell.sel.odd{background:#1d7a4b;border-color:#1d7a4b;color:#fff}
+.adp-cell.sel.even{background:#b27a1d;border-color:#b27a1d;color:#fff}
+.adp-cell:disabled{opacity:.35;cursor:not-allowed}
+.adp-actions{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.adp-hint{font-size:11px;color:#8ea9a0}
+.adp-hint.ok{color:#1d7a4b;font-weight:600}
+.adp-clear{border:0;background:transparent;color:#8ea9a0;font-size:11px;cursor:pointer;text-decoration:underline;padding:0}
+
+@media(max-width:760px){
+  .adp-panels{grid-template-columns:1fr}
+}

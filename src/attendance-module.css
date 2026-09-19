@@ -1,0 +1,148 @@
+/* ═══════════════════════════════════════════════════════
+   Attendance Module – per-group matrix with sticky cells
+   ═══════════════════════════════════════════════════════ */
+
+.am-shell { display:flex; flex-direction:column; gap:16px }
+
+/* ── toolbar ──────────────────────────────────────────── */
+.am-toolbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.am-select{border:1px solid #d9e7e1;border-radius:6px;padding:7px 10px;font-size:12px;color:#36594e;background:#fff}
+.am-search{position:relative}
+.am-search input{border:1px solid #d9e7e1;border-radius:6px;padding:7px 10px 7px 30px;font-size:12px;color:#36594e;background:#fff;width:200px}
+.am-search svg{position:absolute;left:8px;top:50%;transform:translateY(-50%);color:#8ea9a0;pointer-events:none}
+
+/* ── date navigator ───────────────────────────────────── */
+.am-nav{display:flex;align-items:center;gap:6px;flex:1;justify-content:flex-end}
+.am-note{font-size:11px;color:#8ea9a0;margin:0}
+.am-nav-btn{display:inline-flex;align-items:center;justify-content:center;width:30px;height:30px;border-radius:6px;border:1px solid #d9e7e1;background:#fff;color:#36594e;cursor:pointer}
+.am-nav-btn:hover{background:#e8f0ec;border-color:#b5d0c7}
+.am-nav-label{font:600 12px/1 'Manrope',sans-serif;color:#36594e;padding:0 6px;min-width:90px;text-align:center;white-space:nowrap}
+.am-nav-btn.active{background:#2a614b;color:#fff;border-color:#2a614b}
+.am-nav-current{border:1px solid #2a7a8a;color:#2a7a8a;background:#eaf4f6;border-radius:6px;padding:0 12px;height:30px;font:600 12px 'Manrope',sans-serif;cursor:pointer}
+.am-nav-current:hover{background:#ffffff}
+.am-nav-view{position:relative;display:inline-flex}
+.am-view-menu{position:absolute;right:0;top:34px;z-index:90;background:#fff;border:1px solid #d9e7e1;border-radius:8px;box-shadow:0 6px 22px #173c351a;min-width:190px;padding:6px;display:flex;flex-direction:column;gap:2px}
+.am-view-head{font-size:10px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;color:#8ea9a0;padding:4px 10px 6px}
+.am-view-menu button{display:flex;align-items:center;gap:8px;padding:7px 10px;border:0;background:#fff;border-radius:5px;font-size:12px;color:#36594e;cursor:pointer;text-align:left;width:100%}
+.am-view-menu button:hover{background:#e8f0ec}
+.am-view-check{width:15px;height:15px;flex:0 0 15px;border:1px solid #cdd9d5;border-radius:4px;display:grid;place-items:center;color:#1d7a4b;background:#fff}
+.am-view-check.on{background:#e8f6ee;border-color:#1d7a4b}
+
+/* ── view / filter row ────────────────────────────────── */
+.am-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.am-tag{border:1px solid #d9e7e1;border-radius:4px;padding:4px 9px;font-size:11px;color:#36594e;background:#fff;cursor:pointer;white-space:nowrap;display:inline-flex;align-items:center;gap:4px}
+.am-tag:hover{background:#e8f0ec}
+.am-tag.on{background:#e8f0ec;border-color:#b5d0c7;color:#1a5c3b}
+.am-divider{width:1px;height:18px;background:#d9e7e1;margin:0 2px}
+
+/* ── legend ────────────────────────────────────────────── */
+.am-legend{display:flex;gap:10px;flex-wrap:wrap}
+.am-legend-item{display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#5a7972}
+.am-legend-dot{width:10px;height:10px;border-radius:3px;padding:0;min-width:0}
+.am-legend-dot.plain{border:1.5px solid #cdd9d5;background:#fff}
+
+/* ── stats grid ───────────────────────────────────────── */
+.am-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px}
+.am-stat{border:1px solid #d9e7e1;border-radius:8px;padding:14px 16px;background:#fff;min-height:86px}
+.am-stat-label{font-size:10px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;color:#8ea9a0;margin-bottom:6px}
+.am-stat-val{font:800 24px/1 'Manrope',sans-serif;color:#173c35}
+.am-stat-val.green{color:#1d7a4b}
+.am-stat-val.yellow{color:#b27a1d}
+.am-stat-val.red{color:#b04848}
+.am-stat-val.blue{color:#2a7a8a}
+
+/* ── table scroll container ───────────────────────────── */
+.am-scroll{position:relative;border:1px solid #d9e7e1;border-radius:8px;background:#fff;overflow:auto;max-height:68vh}
+
+/* ── grid (table) ─────────────────────────────────────── */
+.am-grid{border-collapse:separate;border-spacing:0;width:100%;table-layout:fixed}
+.am-grid th,.am-grid td{box-sizing:border-box}
+
+/* corner cell – sticky both */
+.am-corner{position:sticky;left:0;top:0;z-index:30;background:#f7faf8;border-bottom:1px solid #d9e7e1;border-right:1px solid #d9e7e1;padding:10px 12px;text-align:left}
+.am-corner-label{font-size:10px;font-weight:700;color:#8ea9a0;text-transform:uppercase;letter-spacing:.5px;margin-bottom:2px}
+.am-corner-hint{font-size:9px;color:#b0c7be}
+
+/* date header cells – sticky top */
+.am-dh{position:sticky;top:0;z-index:20;background:#f7faf8;border-bottom:1px solid #d9e7e1;border-right:1px solid #d9e7e1;padding:8px 4px;text-align:center;min-width:52px}
+.am-dh .day{font:600 10px/1 'Manrope',sans-serif;color:#5a7972;margin-bottom:3px}
+.am-dh .dnum{font:700 14px/1 'Manrope',sans-serif;color:#36594e}
+.am-dh .wd{font-size:9px;color:#8ea9a0;margin-top:2px}
+.am-dh.today{background:#e4f5ed}
+.am-dh.today .dnum{color:#1d7a4b}
+.am-dh.weekend{opacity:.45}
+
+/* student name column – sticky left */
+.am-nc{position:sticky;left:0;z-index:10;background:#fff;border-bottom:1px solid #e8f0ec;border-right:1px solid #d9e7e1;padding:10px 10px 10px 12px;display:flex;align-items:center;gap:8px;min-width:180px;max-width:220px}
+.am-nc .avatar{width:28px;height:28px;border-radius:50%;background:#d8eae3;color:#286b5e;display:grid;place-items:center;font-size:9px;font-weight:700;flex:0 0 28px}
+.am-nc .nm{font-size:12px;font-weight:600;color:#36594e;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.am-row:hover .am-nc{background:#fafdfb}
+
+/* attendance cell */
+.am-cell{border-bottom:1px solid #f0f5f2;border-right:1px solid #f0f5f2;padding:6px 4px;text-align:center;min-width:52px;height:46px;cursor:pointer;position:relative}
+.am-cell:hover{background:#f0faf4}
+.am-cell.weekend{background:#fafcfa}
+.am-cell.future{opacity:.35;pointer-events:none}
+.am-cell.today{background:#f5fbf7}
+
+/* attendance % corner (sticky top+right) */
+.am-pct-th{position:sticky;top:0;right:0;z-index:25;background:#f7faf8;border-bottom:1px solid #d9e7e1;border-left:1px solid #d9e7e1;padding:8px 6px;text-align:center;min-width:56px;font-size:10px;font-weight:700;color:#8ea9a0}
+
+/* badges */
+.am-badge{display:inline-flex;align-items:center;justify-content:center;border-radius:14px;padding:3px 10px;font-size:11px;font-weight:600;white-space:nowrap;line-height:1.4;min-width:44px;border:1.5px solid transparent}
+.am-badge-was{background:#1d7a4b11;color:#1d7a4b;border-color:#1d7a4b33}
+.am-badge-not{background:#b27a1d11;color:#b27a1d;border-color:#b27a1d33}
+.am-badge-late{background:#d9770611;color:#d97706;border-color:#d9770633}
+.am-badge-excused{background:#7c3aed11;color:#7c3aed;border-color:#7c3aed33}
+.am-empty-dot{width:28px;height:14px;border-radius:14px;border:1.5px solid #cdd9d5;background:#fff}
+.am-cell-saving{opacity:.55;pointer-events:none}
+
+/* full-view attendance % col */
+.am-pct-col{position:sticky;right:0;z-index:10;background:#fff;border-bottom:1px solid #e8f0ec;border-left:1px solid #d9e7e1;padding:10px 10px;text-align:center;font:600 11px/1 'Manrope',sans-serif;color:#36594e;min-width:56px}
+.am-pct-col .pct{font-size:13px;font-weight:800}
+.am-pct-col.high{color:#1d7a4b}.am-pct-col.mid{color:#b27a1d}.am-pct-col.low{color:#b04848}
+
+/* ── popover ──────────────────────────────────────────── */
+.am-popover{position:fixed;z-index:100;background:#fff;border:1px solid #d9e7e1;border-radius:8px;box-shadow:0 6px 22px #173c351a;min-width:160px;padding:6px;display:flex;flex-direction:column;gap:2px;animation:amfadein .12s ease-out}
+@keyframes amfadein{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:none}}
+.am-popover-item{display:flex;align-items:center;gap:8px;padding:7px 10px;border:0;background:#fff;border-radius:5px;font-size:12px;color:#36594e;cursor:pointer;text-align:left;width:100%}
+.am-popover-item:hover{background:#e8f0ec}
+.am-popover-item.danger{color:#b04848}
+.am-popover-item.danger:hover{background:#fdf0f0}
+.am-popover-item svg{width:14px;height:14px;flex:0 0 14px}
+.am-popover-dot{width:8px;height:8px;border-radius:3px;flex:0 0 8px}
+.am-popover-head{padding:4px 10px 8px}
+.am-popover-head strong{display:block;font:600 12px 'Manrope',sans-serif;color:#36594e}
+.am-popover-head span{font-size:11px;color:#8ea9a0}
+
+/* ── tooltip ──────────────────────────────────────────── */
+.am-tooltip{position:fixed;z-index:110;pointer-events:none;background:#173c35;color:#e8f0ec;border-radius:6px;padding:8px 11px;font-size:11px;line-height:1.5;max-width:220px;box-shadow:0 4px 14px #173c3533}
+.am-tooltip strong{display:block;margin-bottom:2px}
+
+/* ── toast ────────────────────────────────────────────── */
+.am-toast-host{position:fixed;bottom:24px;right:24px;z-index:200;display:flex;flex-direction:column;gap:8px}
+.am-toast{display:inline-flex;align-items:center;gap:8px;border-radius:7px;padding:10px 14px;font-size:12px;font-weight:600;color:#fff;background:#2a614b;box-shadow:0 4px 16px #173c3533;animation:amfadein .15s ease-out}
+.am-toast.error{background:#b04848}
+.am-toast svg{width:16px;height:16px;flex:0 0 16px}
+
+/* ── skeleton / loading / empty ───────────────────────── */
+.am-skel{animation:ampulse 1.4s ease-in-out infinite;background:#e2ebe7;border-radius:4px}
+@keyframes ampulse{0%,100%{opacity:1}50%{opacity:.4}}
+.am-empty{text-align:center;padding:60px 20px}
+.am-empty svg{color:#b5d0c7;margin-bottom:12px}
+.am-empty p{font-size:13px;color:#8ea9a0}
+
+/* ── pagination ───────────────────────────────────────── */
+.am-pager{display:flex;gap:6px;align-items:center;justify-content:space-between;padding:10px 14px;border-top:1px solid #e8f0ec;font-size:11px;color:#8ea9a0}
+.am-pager button{border:1px solid #d9e7e1;border-radius:4px;padding:4px 10px;font-size:11px;color:#36594e;background:#fff;cursor:pointer}
+.am-pager button:hover{background:#e8f0ec}
+.am-pager button:disabled{opacity:.4;cursor:default}
+
+/* ── responsive ───────────────────────────────────────── */
+@media(max-width:760px){
+  .am-stats{grid-template-columns:repeat(2,1fr)}
+  .am-toolbar{flex-direction:column;align-items:stretch}
+  .am-nav{justify-content:flex-start}
+  .am-search input{width:100%}
+  .am-nc{min-width:140px}
+}
