@@ -4,13 +4,62 @@ import jwt from 'jsonwebtoken'
 import bcrypt from 'bcryptjs'
 import fs from 'node:fs'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+import 'dotenv/config'
 import { getDb, migrate, backupsPath, createBackup, listBackups, restoreBackup, resetDemoData } from './db.js'
+import {
+  tashkentToday,
+  tashkentMonth,
+  runMonthlyBilling,
+  ensureBillsForYearMonth,
+  billingOverview,
+  refreshBillingForPayment,
+  detachBillingForPayment,
+  getLessonDates,
+  weekdayOf,
+} from './billing.js'
+
+const distPath = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'dist')
 
 migrate()
+runMonthlyBilling('startup')
+setInterval(() => runMonthlyBilling('timer'), 6 * 60 * 60 * 1000).unref()
 const app = express()
 app.use(cors())
-app.use(express.json())
-const secret = process.env.JWT_SECRET ?? 'brightpath-education-centre-production-secret-change-me'
+app.use(express.json({ limit: '100kb' }))
+
+function resolveSecret(): string {
+  const secret = process.env.JWT_SECRET
+  if (secret) return secret
+  if (process.env.NODE_ENV === 'production') {
+    console.error('[security] Fatal: JWT_SECRET must be set when NODE_ENV=production.')
+    console.error('[security] Generate one with: node -e "console.log(require(\'node:crypto\').randomBytes(48).toString(\'hex\'))"')
+    process.exit(1)
+  }
+  console.warn('[security] JWT_SECRET is not set — using an insecure development-only secret. Set JWT_SECRET before going live.')
+  return 'harry-school-development-only-secret'
+}
+const secret = resolveSecret()
+
+const BCRYPT_ROUNDS = 12
+const LOGIN_MAX_ATTEMPTS = 5
+const LOGIN_LOCK_MS = 15 * 60 * 1000
+const loginAttempts = new Map<string, { count: number; lockedUntil: number }>()
+setInterval(() => {
+  const now = Date.now()
+  for (const [key, entry] of loginAttempts) {
+    if (entry.lockedUntil > 0 && entry.lockedUntil < now) loginAttempts.delete(key)
+  }
+}, 5 * 60 * 1000).unref()
+
+function passwordPolicyError(password: string): string | null {
+  if (password.length < 10) return 'Password must be at least 10 characters long.'
+  if (!/[A-Z]/.test(password) || !/[a-z]/.test(password)) return 'Password must include both uppercase and lowercase letters.'
+  if (!/\d/.test(password)) return 'Password must include at least one number.'
+  if (!/[^A-Za-z0-9]/.test(password)) return 'Password must include at least one symbol.'
+  return null
+}
+
 const db = getDb()
 
 type AuthUser = {
@@ -21,6 +70,7 @@ type AuthUser = {
   role_id: number
   role_name: string
   password_hash: string
+  must_change_password: number
 }
 type AuthedRequest = express.Request & { user?: AuthUser; permissions?: Set<string> }
 
@@ -32,6 +82,9 @@ function authRequired(req: AuthedRequest, res: express.Response, next: express.N
     const payload = jwt.verify(token, secret) as { userId: number; roleId: number }
     const user = db.prepare('SELECT users.*, roles.name as role_name FROM users LEFT JOIN roles ON roles.id = users.role_id WHERE users.id = ?').get(payload.userId) as AuthUser | undefined
     if (!user) return res.status(401).json({ message: 'Account not found' })
+    if (user.must_change_password && !['/api/auth/change-password', '/api/auth/me'].includes(req.path)) {
+      return res.status(403).json({ message: 'Password change required', must_change_password: true })
+    }
     const perms = db.prepare('SELECT p.module, p.action FROM permissions p JOIN role_permissions rp ON rp.permission_id = p.id WHERE rp.role_id = ?').all(user.role_id) as { module: string; action: string }[]
     req.user = user
     req.permissions = new Set(perms.map((p) => `${p.module}:${p.action}`))
@@ -55,6 +108,7 @@ function superAdminOnly(req: AuthedRequest, res: express.Response, next: express
 }
 
 app.use((req: AuthedRequest, res: express.Response, next: express.NextFunction) => {
+  if (!req.path.startsWith('/api')) return next()
   if (req.path === '/api/auth/login' || req.path === '/api/health') return next()
   return authRequired(req, res, next)
 })
@@ -68,8 +122,8 @@ function sendMessage(recipient: string, channel: string, subject: string, body: 
   db.prepare('INSERT INTO messages (recipient, channel, subject, body) VALUES (?, ?, ?, ?)').run(recipient.trim(), channel, subject.trim(), body.trim())
 }
 
-const today = () => new Date().toISOString().slice(0, 10)
-const currentMonth = () => new Date().toISOString().slice(0, 7)
+const today = () => tashkentToday()
+const currentMonth = () => tashkentMonth()
 function monthEnd(key: string): string {
   const [year, month] = key.split('-').map(Number)
   const date = new Date(year, month, 0)
@@ -107,20 +161,60 @@ function getStudentFinance(studentId: number, monthKey?: string) {
   }
 }
 
+function publicUser(user: AuthUser) {
+  return { id: user.id, name: user.name, email: user.email, phone: user.phone, role: user.role_name, role_name: user.role_name, must_change_password: Boolean(user.must_change_password) }
+}
+
+function userPermissions(userId: number): string[] {
+  const rows = db.prepare('SELECT p.module, p.action FROM permissions p JOIN role_permissions rp ON rp.permission_id = p.id WHERE rp.role_id = (SELECT role_id FROM users WHERE id = ?)').all(userId) as { module: string; action: string }[]
+  return rows.map((p) => `${p.module}:${p.action}`)
+}
+
 app.get('/api/health', (_req, res) => res.json({ ok: true }))
 app.post('/api/auth/login', (req, res) => {
-  const phone = String(req.body.phone ?? '').replace(/\D/g, '')
+  const phone = String(req.body.phone ?? '').trim().replace(/\D/g, '')
   const password = String(req.body.password ?? '')
-  const users = db.prepare('SELECT users.*, roles.name as role_name FROM users LEFT JOIN roles ON roles.id = users.role_id').all() as AuthUser[]
-  const user = users.find((u) => (u.phone ?? '').replace(/\D/g, '') === phone)
-  if (!phone || !user || !password || !bcrypt.compareSync(password, user.password_hash)) return res.status(401).json({ message: 'Invalid phone number or password' })
+  if (!phone || !password) return res.status(400).json({ message: 'Phone number and password are required' })
+  const attemptKey = `phone:${phone}`
+  const now = Date.now()
+  const attempt = loginAttempts.get(attemptKey)
+  if (attempt && attempt.lockedUntil > now) {
+    const minutes = Math.ceil((attempt.lockedUntil - now) / 60000)
+    return res.status(429).json({ message: `Too many failed attempts. Try again in ${minutes} minute${minutes === 1 ? '' : 's'}.` })
+  }
+  const user = (db.prepare('SELECT users.*, roles.name as role_name FROM users LEFT JOIN roles ON roles.id = users.role_id').all() as AuthUser[])
+    .find((u) => (u.phone ?? '').replace(/\D/g, '') === phone)
+  const valid = !!user && bcrypt.compareSync(password, user.password_hash)
+  if (!valid) {
+    const entry = attempt ? { ...attempt } : { count: 1, lockedUntil: 0 }
+    if (entry.lockedUntil === 0) entry.count += 1
+    if (entry.count >= LOGIN_MAX_ATTEMPTS) {
+      entry.count = 0
+      entry.lockedUntil = now + LOGIN_LOCK_MS
+    }
+    loginAttempts.set(attemptKey, entry)
+    const message = entry.lockedUntil > 0 ? 'Too many failed attempts. This account is temporarily locked for 15 minutes.' : 'Invalid phone number or password'
+    return res.status(entry.lockedUntil > 0 ? 429 : 401).json({ message })
+  }
+  loginAttempts.delete(attemptKey)
   const token = jwt.sign({ userId: user.id, roleId: user.role_id }, secret, { expiresIn: '12h' })
-  const permissions = (db.prepare('SELECT p.module, p.action FROM permissions p JOIN role_permissions rp ON rp.permission_id = p.id WHERE rp.role_id = ?').all(user.role_id) as { module: string; action: string }[]).map((p) => `${p.module}:${p.action}`)
-  res.json({ token, user: { id: user.id, name: user.name, email: user.email, phone: user.phone, role: user.role_name, role_name: user.role_name }, permissions })
+  res.json({ token, user: publicUser(user), permissions: userPermissions(user.id) })
 })
-app.get('/api/auth/me', can('dashboard', 'view'), (req: AuthedRequest, res) => {
-  const permissions = (db.prepare('SELECT p.module, p.action FROM permissions p JOIN role_permissions rp ON rp.permission_id = p.id WHERE rp.role_id = ?').all(req.user!.role_id) as { module: string; action: string }[]).map((p) => `${p.module}:${p.action}`)
-  res.json({ user: { id: req.user!.id, name: req.user!.name, email: req.user!.email, phone: req.user!.phone, role: req.user!.role_name, role_name: req.user!.role_name }, permissions })
+app.post('/api/auth/change-password', (req: AuthedRequest, res) => {
+  const current = String(req.body.current_password ?? '')
+  const next = String(req.body.new_password ?? '')
+  if (!current || !next) return res.status(400).json({ message: 'Current and new passwords are required.' })
+  if (!bcrypt.compareSync(current, req.user!.password_hash)) return res.status(400).json({ message: 'Current password is incorrect.' })
+  const policyError = passwordPolicyError(next)
+  if (policyError) return res.status(400).json({ message: policyError })
+  if (bcrypt.compareSync(next, req.user!.password_hash)) return res.status(400).json({ message: 'New password must be different from the current one.' })
+  const hash = bcrypt.hashSync(next, BCRYPT_ROUNDS)
+  db.prepare('UPDATE users SET password_hash = ?, must_change_password = 0 WHERE id = ?').run(hash, req.user!.id)
+  logActivity(req, 'updated', 'Staff password')
+  res.json({ ok: true, user: publicUser({ ...req.user!, password_hash: hash, must_change_password: 0 }) })
+})
+app.get('/api/auth/me', (req: AuthedRequest, res) => {
+  res.json({ user: publicUser(req.user!), permissions: userPermissions(req.user!.id) })
 })
 
 app.get('/api/users', superAdminOnly, (_req, res) => res.json(db.prepare('SELECT users.id, users.name, users.email, users.phone, users.role_id, roles.name as role_name FROM users LEFT JOIN roles ON roles.id = users.role_id ORDER BY users.name').all()))
@@ -136,7 +230,7 @@ app.post('/api/users', superAdminOnly, (req, res) => {
     for (const permission of viewPermissions) addPermission.run(role.id, permission.id)
   }
   try {
-    const result = db.prepare('INSERT INTO users (name, email, phone, password_hash, role_id) VALUES (?, ?, ?, ?, ?)').run(name.trim(), `${phone.replace(/\D/g, '')}@brightpath.local`, phone.trim(), bcrypt.hashSync(password, 10), role.id)
+    const result = db.prepare('INSERT INTO users (name, email, phone, password_hash, role_id) VALUES (?, ?, ?, ?, ?)').run(name.trim(), `${phone.replace(/\D/g, '')}@harryschool.local`, phone.trim(), bcrypt.hashSync(password, 10), role.id)
     logActivity(req, 'created', `Staff account ${name.trim()}`)
     res.status(201).json(db.prepare('SELECT users.id, users.name, users.email, users.phone, users.role_id, roles.name as role_name FROM users LEFT JOIN roles ON roles.id = users.role_id WHERE users.id = ?').get(result.lastInsertRowid))
   } catch { res.status(409).json({ message: 'That phone number is already in use' }) }
@@ -151,7 +245,7 @@ app.patch('/api/users/:id', superAdminOnly, (req, res) => {
     const role = db.prepare('SELECT id FROM roles WHERE name = ?').get(role_name) as { id: number } | undefined
     if (role) roleId = role.id
   }
-  const email = `${phone.replace(/\D/g, '')}@brightpath.local`
+  const email = `${phone.replace(/\D/g, '')}@harryschool.local`
   try {
     if (password) {
       db.prepare('UPDATE users SET name = ?, email = ?, phone = ?, password_hash = ?, role_id = ? WHERE id = ?').run(name.trim(), email, phone.trim(), bcrypt.hashSync(password, 10), roleId, req.params.id)
@@ -387,17 +481,25 @@ app.delete('/api/courses/:id', can('courses', 'delete'), (req, res) => {
 })
 
 app.get('/api/payments', can('payments', 'view'), (_req, res) => res.json(db.prepare('SELECT * FROM payments ORDER BY paid_at DESC').all()))
+app.get('/api/payments/student/:studentId', can('payments', 'view'), (req, res) => {
+  const studentId = Number(req.params.studentId)
+  const payments = db.prepare('SELECT * FROM payments WHERE student_id = ? ORDER BY paid_at DESC').all(studentId)
+  res.json(payments)
+})
 app.post('/api/payments', can('payments', 'create'), (req, res) => {
-  const { student_id, student_name, amount, method = 'Cash' } = req.body
+  const { student_id, student_name, amount, method = 'Cash', paid_at } = req.body
   if (!student_id || !student_name || !Number(amount)) return res.status(400).json({ message: 'Student and amount are required' })
   if (Number(amount) <= 0) return res.status(400).json({ message: 'Amount must be positive' })
-  const result = db.prepare('INSERT INTO payments (student_id, student_name, amount, method) VALUES (?, ?, ?, ?)').run(student_id, student_name, Number(amount), method)
+  const paymentDate = String(paid_at ? String(paid_at).slice(0, 10) : today())
+  const result = db.prepare('INSERT INTO payments (student_id, student_name, amount, method, paid_at) VALUES (?, ?, ?, ?, ?)').run(student_id, student_name, Number(amount), method, paymentDate)
+  const paymentId = Number(result.lastInsertRowid)
   db.prepare('UPDATE students SET balance = balance + ? WHERE id = ?').run(Number(amount), student_id)
   db.prepare("UPDATE invoices SET status = 'paid' WHERE status = 'unpaid' AND student_id = ? AND month = substr(date('now'), 1, 7)").run(student_id)
+  refreshBillingForPayment(paymentId)
   const student = db.prepare('SELECT parent_name, parent_phone FROM students WHERE id = ?').get(student_id) as { parent_name: string; parent_phone: string } | undefined
-  if (student?.parent_phone) sendMessage(student.parent_name || student_name, 'SMS', `Receipt №${String(result.lastInsertRowid).padStart(7, '0')}`, `We received ${Number(amount).toLocaleString()} UZS from ${student_name}. Thank you for choosing BrightPath Education Centre.`)
+  if (student?.parent_phone) sendMessage(student.parent_name || student_name, 'SMS', `Receipt №${String(paymentId).padStart(7, '0')}`, `We received ${Number(amount).toLocaleString()} UZS from ${student_name}. Thank you for choosing Harry School.`)
   logActivity(req, 'recorded payment', `${student_name} · ${Number(amount).toLocaleString()} UZS`)
-  res.status(201).json(db.prepare('SELECT * FROM payments WHERE id = ?').get(result.lastInsertRowid))
+  res.status(201).json(db.prepare('SELECT * FROM payments WHERE id = ?').get(paymentId))
 })
 app.patch('/api/payments/:id', can('payments', 'edit'), (req, res) => {
   const { amount, method = 'Cash', status = 'Paid' } = req.body
@@ -407,6 +509,7 @@ app.patch('/api/payments/:id', can('payments', 'edit'), (req, res) => {
   const newAmount = Number(amount)
   db.prepare('UPDATE payments SET amount = ?, method = ?, status = ? WHERE id = ?').run(newAmount, method, status, req.params.id)
   if (payment.student_id) db.prepare('UPDATE students SET balance = balance + ? WHERE id = ?').run(payment.amount - newAmount, payment.student_id)
+  refreshBillingForPayment(Number(req.params.id))
   logActivity(req, 'updated payment', `#${req.params.id} → ${newAmount.toLocaleString()} UZS`)
   res.json(db.prepare('SELECT * FROM payments WHERE id = ?').get(req.params.id))
 })
@@ -415,6 +518,7 @@ app.delete('/api/payments/:id', can('payments', 'delete'), (req, res) => {
   if (!payment) return res.status(404).json({ message: 'Payment not found' })
   db.prepare('DELETE FROM payments WHERE id = ?').run(req.params.id)
   if (payment.student_id) db.prepare('UPDATE students SET balance = balance - ? WHERE id = ?').run(payment.amount, payment.student_id)
+  detachBillingForPayment(Number(req.params.id))
   logActivity(req, 'deleted payment', `${payment.student_name} · ${payment.amount.toLocaleString()} UZS`)
   res.status(204).send()
 })
@@ -559,6 +663,119 @@ app.get('/api/debts', can('debts', 'view'), (_req, res) => {
   res.json(debts)
 })
 
+function parseYearMonth(raw: string | undefined): { year: number; month: number } | null {
+  const match = /^(\d{4})-(\d{2})$/.exec(String(raw ?? ''))
+  if (!match) return null
+  const year = Number(match[1])
+  const month = Number(match[2])
+  if (month < 1 || month > 12) return null
+  return { year, month }
+}
+
+app.get('/api/billing/current-month', can('billing', 'view'), (_req, res) => {
+  const { year, month } = (() => {
+    const key = currentMonth()
+    return { year: Number(key.slice(0, 4)), month: Number(key.slice(5, 7)) }
+  })()
+  ensureBillsForYearMonth(year, month)
+  res.json(billingOverview(year, month))
+})
+app.get('/api/billing/debtors', can('billing', 'view'), (req, res) => {
+  const target = parseYearMonth(req.query.month as string | undefined)
+  const { year, month } = target ?? { year: Number(currentMonth().slice(0, 4)), month: Number(currentMonth().slice(5, 7)) }
+  ensureBillsForYearMonth(year, month)
+  res.json(billingOverview(year, month).debtors)
+})
+app.get('/api/billing/student/:studentId', can('billing', 'view'), (req, res) => {
+  const studentId = Number(req.params.studentId)
+  const student = db.prepare('SELECT id, name FROM students WHERE id = ?').get(studentId) as { id: number; name: string } | undefined
+  if (!student) return res.status(404).json({ message: 'Student not found' })
+  const bills = (db.prepare('SELECT * FROM bills WHERE student_id = ? ORDER BY year DESC, month DESC').all(studentId) as Record<string, unknown>[])
+    .map((row) => ({
+      id: Number(row.id),
+      year: Number(row.year),
+      month: Number(row.month),
+      month_key: `${String(row.year).padStart(4, '0')}-${String(row.month).padStart(2, '0')}`,
+      group_name: String(row.group_name ?? ''),
+      course_name: String(row.course_name ?? ''),
+      monthly_price: Number(row.monthly_price ?? 0),
+      paid_amount: Number(row.paid_amount ?? 0),
+      remaining_amount: Number(row.remaining_amount ?? 0),
+      status: String(row.status ?? 'debtor'),
+    }))
+  const payments = db.prepare('SELECT * FROM payments WHERE student_id = ? ORDER BY paid_at DESC').all(studentId)
+  res.json({ student, bills, payments })
+})
+app.get('/api/billing/:monthKey', can('billing', 'view'), (req, res) => {
+  const target = parseYearMonth(req.params.monthKey)
+  if (!target) return res.status(400).json({ message: 'Invalid month — expected YYYY-MM' })
+  ensureBillsForYearMonth(target.year, target.month)
+  res.json(billingOverview(target.year, target.month))
+})
+app.post('/api/billing/generate', can('billing', 'create'), (req, res) => {
+  const target = parseYearMonth(req.body?.month as string | undefined)
+  const { year, month } = target ?? { year: Number(currentMonth().slice(0, 4)), month: Number(currentMonth().slice(5, 7)) }
+  const { count } = ensureBillsForYearMonth(year, month)
+  const overview = billingOverview(year, month)
+  logActivity(req, 'generated monthly billing', `${overview.month_key} · ${count} students · ${overview.summary.expected_revenue.toLocaleString()} UZS`)
+  res.json({ created: count, month: overview.month_key, summary: overview.summary })
+})
+
+const groupSchedule = (req: AuthedRequest, res: express.Response, target: { year: number; month: number }) => {
+  const group = db.prepare('SELECT * FROM groups WHERE id = ?').get(Number(req.params.groupId)) as Record<string, unknown> | undefined
+  if (!group) return res.status(404).json({ message: 'Group not found' })
+  const rawDays = String(group.schedule_days ?? group.schedule ?? '')
+  const dates = getLessonDates(target.year, target.month, rawDays)
+  res.json({
+    group: { id: group.id, name: group.name, course: group.course, teacher: group.teacher, room_name: group.room_name, schedule_time: group.schedule_time, schedule_days: rawDays },
+    events: dates.map((date) => ({ date, weekday: weekdayOf(date) })),
+  })
+}
+app.get('/api/groups/:groupId/schedule/:monthKey', can('schedule', 'view'), (req, res) => {
+  const target = parseYearMonth(req.params.monthKey)
+  if (!target) return res.status(400).json({ message: 'Invalid month — expected YYYY-MM' })
+  groupSchedule(req, res, target)
+})
+app.get('/api/groups/:groupId/schedule/:year/:month', can('schedule', 'view'), (req, res) => {
+  const target = parseYearMonth(`${req.params.year}-${req.params.month}`)
+  if (!target) return res.status(400).json({ message: 'Invalid month — expected YYYY-MM' })
+  groupSchedule(req, res, target)
+})
+const allSchedule = (req: AuthedRequest, res: express.Response, target: { year: number; month: number }) => {
+  const groups = db.prepare("SELECT * FROM groups WHERE status = 'Active' ORDER BY name").all() as Record<string, unknown>[]
+  const events: { group_id: number; group_name: string; course: string; teacher: string; room_name: string; schedule_time: string; date: string; weekday: string }[] = []
+  const daysInMonth = new Date(Date.UTC(target.year, target.month, 0)).getUTCDate()
+  const validDay = (date: string) => Number(date.slice(8, 10)) >= 1 && Number(date.slice(8, 10)) <= daysInMonth
+  for (const group of groups) {
+    const rawDays = String(group.schedule_days ?? group.schedule ?? '')
+    const dates = getLessonDates(target.year, target.month, rawDays).filter(validDay)
+    for (const date of dates) {
+      events.push({
+        group_id: Number(group.id),
+        group_name: String(group.name),
+        course: String(group.course ?? ''),
+        teacher: String(group.teacher ?? ''),
+        room_name: String(group.room_name ?? ''),
+        schedule_time: String(group.schedule_time ?? ''),
+        date,
+        weekday: weekdayOf(date),
+      })
+    }
+  }
+  events.sort((a, b) => a.date.localeCompare(b.date) || a.group_name.localeCompare(b.group_name))
+  res.json(events)
+}
+app.get('/api/schedule/:monthKey', can('schedule', 'view'), (req, res) => {
+  const target = parseYearMonth(req.params.monthKey)
+  if (!target) return res.status(400).json({ message: 'Invalid month — expected YYYY-MM' })
+  allSchedule(req, res, target)
+})
+app.get('/api/schedule/:year/:month', can('schedule', 'view'), (req, res) => {
+  const target = parseYearMonth(`${req.params.year}-${req.params.month}`)
+  if (!target) return res.status(400).json({ message: 'Invalid month — expected YYYY-MM' })
+  allSchedule(req, res, target)
+})
+
 app.get('/api/exams', can('exams', 'view'), (_req, res) => res.json(db.prepare('SELECT * FROM exams ORDER BY taken_at DESC').all()))
 app.post('/api/exams', can('exams', 'create'), (req, res) => {
   const { student_id, exam_type, score = 0, max_score = 100, level = '', taken_at = today(), note = '' } = req.body
@@ -583,10 +800,10 @@ app.get('/api/rooms', can('rooms', 'view'), (req, res) => {
   res.json(enriched)
 })
 app.post('/api/rooms', can('rooms', 'create'), (req, res) => {
-  const { name, capacity = 0, location = '', status = 'Active' } = req.body
+  const { name, number = '', capacity = 0, location = '', status = 'Active' } = req.body
   if (!name?.trim()) return res.status(400).json({ message: 'Room name is required' })
   try {
-    const result = db.prepare('INSERT INTO rooms (name, capacity, location, status) VALUES (?, ?, ?, ?)').run(name.trim(), Number(capacity) || 0, location.trim(), status)
+    const result = db.prepare('INSERT INTO rooms (name, number, capacity, location, status) VALUES (?, ?, ?, ?, ?)').run(name.trim(), String(number ?? '').trim(), Number(capacity) || 0, location.trim(), status)
     logActivity(req, 'created', `Room ${name.trim()}`)
     res.status(201).json(db.prepare('SELECT * FROM rooms WHERE id = ?').get(result.lastInsertRowid))
   } catch { res.status(409).json({ message: 'A room with that name already exists' }) }
@@ -594,8 +811,8 @@ app.post('/api/rooms', can('rooms', 'create'), (req, res) => {
 app.patch('/api/rooms/:id', can('rooms', 'edit'), (req, res) => {
   const room = db.prepare('SELECT id FROM rooms WHERE id = ?').get(req.params.id)
   if (!room) return res.status(404).json({ message: 'Room not found' })
-  const { name, capacity = 0, location = '', status = 'Active' } = req.body
-  db.prepare('UPDATE rooms SET name = ?, capacity = ?, location = ?, status = ? WHERE id = ?').run(name.trim(), Number(capacity) || 0, location.trim(), status, req.params.id)
+  const { name, number = '', capacity = 0, location = '', status = 'Active' } = req.body
+  db.prepare('UPDATE rooms SET name = ?, number = ?, capacity = ?, location = ?, status = ? WHERE id = ?').run(name.trim(), String(number ?? '').trim(), Number(capacity) || 0, location.trim(), status, req.params.id)
   res.json(db.prepare('SELECT * FROM rooms WHERE id = ?').get(req.params.id))
 })
 app.delete('/api/rooms/:id', can('rooms', 'delete'), (req, res) => {
@@ -666,7 +883,7 @@ app.get('/api/dashboard', can('dashboard', 'view'), (_req, res) => {
     present_today: present.count,
     late_today: late.count,
     absent_today: absent.count,
-    revenue,
+    revenue: revenue.total,
     previous_revenue: previousRevenue.total,
     unread_reports: unreadReports.count,
     unpaid_invoices: unpaidInvoices.count,
@@ -735,4 +952,11 @@ app.post('/api/system/reset', superAdminOnly, (req, res) => {
   res.json({ message: 'Demo data has been reset to the original seed' })
 })
 
-app.listen(3001, () => console.log('BrightPath API listening on http://localhost:3001'))
+app.use(express.static(distPath))
+app.use((req, res, next) => {
+  if (req.method !== 'GET' || req.path.startsWith('/api')) return next()
+  res.sendFile(path.join(distPath, 'index.html'), (err) => { if (err) next(err) })
+})
+
+const port = Number(process.env.PORT ?? 3001)
+app.listen(port, '0.0.0.0', () => console.log(`Harry School API listening on http://0.0.0.0:${port}`))

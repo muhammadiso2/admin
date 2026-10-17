@@ -1,0 +1,38 @@
+# Render blueprint for Harry School.
+# Deploy with: New -> Blueprint -> point at this repo. Render reads this file.
+#
+# The service is a single Node web service: Express serves the API *and* the
+# built Vite frontend from dist/, so there is no separate static site.
+#
+# The disk is the important part. Render's filesystem is ephemeral — without a
+# disk mounted at /var/data, every deploy/restart would wipe the SQLite database
+# and re-seed demo data. Disks require a paid plan, hence plan: starter.
+
+services:
+  - type: web
+    name: harry-school
+    runtime: node
+    plan: starter
+    region: frankfurt # closest Render region to Uzbekistan; change if you prefer
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/health
+    autoDeploy: true
+
+    disk:
+      name: harry-school-data
+      mountPath: /var/data
+      sizeGB: 1
+
+    envVars:
+      - key: NODE_ENV
+        value: production
+      # Keep the database and its backups on the persistent disk.
+      - key: DB_PATH
+        value: /var/data/centre.sqlite
+      - key: BACKUPS_PATH
+        value: /var/data/backups
+      # Render generates a strong random value and stores it for you.
+      # To rotate it later, delete this env var and trigger a redeploy.
+      - key: JWT_SECRET
+        generateValue: true

@@ -10,3 +10,20 @@
 .stat-icon.small{width:26px;height:26px;border-radius:8px}.stat-icon.small>svg{width:14px;height:14px}
 .danger-zone{display:grid;gap:14px;padding:6px 2px}
 textarea{width:100%;border:1px solid #dde8e3;border-radius:6px;padding:10px;margin-top:6px;outline-color:#4a988a;font-size:12px;background:#fff;color:#36594e;resize:vertical}
+.month-nav{display:inline-flex;align-items:center;gap:6px;background:#f4f8f6;border:1px solid #e3ece8;border-radius:8px;padding:4px}
+.month-nav input[type=month]{border:0;background:transparent;font:600 12px 'Manrope';color:#36594e;outline:none;width:118px;color-scheme:light}
+.month-nav-label{font:700 12px 'Manrope';color:#36594e;min-width:118px;text-align:center}
+.month-nav-btn{border:0;background:#fff;border-radius:6px;width:27px;height:27px;display:grid;place-items:center;color:#2b685c;cursor:pointer;box-shadow:0 1px 2px #173c3512}
+.month-nav-btn:hover{background:#e6f2ee}
+.status-pill.partial{background:#fdf3e6;color:#a06f1f}
+.billing-panel{margin-bottom:22px}
+.billing-grid{display:grid;grid-template-columns:1fr 1.15fr;gap:20px;align-items:start;margin-top:18px}
+.billing-stats{margin-bottom:4px}
+.debtors-block .panel-total{margin-top:12px;text-align:right}
+.day-mode-toggle{display:inline-flex;gap:4px;background:#eef4f1;border-radius:8px;padding:3px;margin:2px 0 10px}
+.day-mode-toggle button{border:0;background:transparent;font:600 11px 'Manrope';color:#5d7b70;padding:7px 13px;border-radius:6px;cursor:pointer}
+.day-mode-toggle button.active{background:#fff;color:#173c35;box-shadow:0 1px 3px #173c3526}
+.weekday-picker{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}
+.weekday-picker button{border:1px solid #dde8e3;background:#fff;color:#36594e;border-radius:6px;padding:8px 12px;font:700 11px 'Manrope';cursor:pointer}
+.weekday-picker button.selected{background:#2b685c;border-color:#2b685c;color:#fff}
+@media(max-width:980px){.billing-grid{grid-template-columns:1fr}}

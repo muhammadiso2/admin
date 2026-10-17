@@ -1,7 +1,19 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { AttendanceModule } from "./attendance-module";
+import {
+  FilterBar,
+  FilterChips,
+  FilterEmpty,
+  FilterReset,
+  FilterSearch,
+  FilterSelect,
+  FilterSpacer,
+} from "./filters";
+import { matchesText, panelCount, toOptions, useFilters } from "./filter-helpers";
+import type { FilterOption } from "./filter-helpers";
 import { AttendanceDaysPicker } from "./attendance-days-picker";
-import { parseAttendanceDays, initAttendanceDays, attendanceDaysToLegacy } from "./attendance-days";
+import { parseAttendanceDays, attendanceDaysToLegacy } from "./attendance-days";
+import { WeatherEffects, type WeatherTheme } from "./weather-effects";
 import {
   Area,
   AreaChart,
@@ -13,12 +25,15 @@ import {
 import {
   AlertTriangle,
   Award,
+  Banknote,
   Bell,
   BookOpen,
   Building2,
   CalendarDays,
   Check,
   ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   Clock,
   ClipboardCheck,
   CreditCard,
@@ -37,9 +52,13 @@ import {
   Receipt,
   RotateCcw,
   Search,
+  CloudRain,
+  Leaf,
   Send,
   Settings,
   ShieldCheck,
+  Snowflake,
+  Sun,
   Trash2,
   TrendingUp,
   UserRound,
@@ -49,6 +68,7 @@ import {
 } from "lucide-react";
 import "./App.css";
 import "./student-features.css";
+import "./filters.css";
 
 type Module =
   | "Dashboard"
@@ -60,9 +80,10 @@ type Module =
   | "Attendance"
   | "Exams"
   | "Rooms"
-  | "Payments"
+| "Payments"
   | "Invoices"
   | "Debts"
+  | "Billing"
   | "Receipts"
 | "Reports"
   | "Messages"
@@ -92,7 +113,7 @@ type Payment = {
   paid_at: string;
   status: string;
 };
-type UserAccount = { id: number; name: string; email: string; phone: string; role_id: number; role_name: string };
+type UserAccount = { id: number; name: string; email: string; phone: string; role_id: number; role_name: string; must_change_password?: boolean };
 type StaffRole = { id: number; name: string; description: string; is_system: number; permissions?: string[] };
 type PermissionItem = { id: number; module: string; action: string };
 type CreateType = "student" | "teacher" | "group" | "course" | "role" | "user" | "room";
@@ -104,7 +125,38 @@ type AttendanceRecord = { student_id: number; status: "was" | "not" | "late" | "
 type Report = { id: number; title: string; message: string; author: string; priority: string; created_at: string; is_read: number };
 type Invoice = { id: number; student_id: number; student_name: string; month: string; amount: number; issue_date: string; due_date: string; status: string };
 type Exam = { id: number; student_id: number; student_name: string; group_name: string; exam_type: string; score: number; max_score: number; level: string; taken_at: string };
-type Room = { id: number; name: string; capacity: number; location: string; status: string; groups: { name: string; schedule_days: string; schedule_time: string; students_count: number }[] };
+type Room = { id: number; name: string; number: string; capacity: number; location: string; status: string; groups: { name: string; schedule_days: string; schedule_time: string; students_count: number }[] };
+function scheduleOverlap(daysA: string, daysB: string): boolean {
+  const setA = new Set((daysA || "").split(",").map((day) => day.trim().toLowerCase()).filter(Boolean));
+  const setB = new Set((daysB || "").split(",").map((day) => day.trim().toLowerCase()).filter(Boolean));
+  if (!setA.size || !setB.size) return false;
+  for (const day of setA) if (setB.has(day)) return true;
+  return false;
+}
+type BillStatus = "paid" | "partially_paid" | "debtor";
+type BillRecord = { id: number; student_id: number; student_name: string; year: number; month: number; month_key?: string; group_name: string; course_name: string; monthly_price: number; paid_amount: number; remaining_amount: number; status: BillStatus };
+type BillingData = { year: number; month: number; month_key: string; summary: { total_students: number; expected_revenue: number; paid: number; outstanding: number }; debtors: BillRecord[]; students: BillRecord[] };
+type ScheduleEvent = { group_id: number; group_name: string; course: string; teacher: string; room_name: string; schedule_time: string; date: string; weekday: string };
+const WEEKDAY_ORDER = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+function parseWeekdayNames(value: string): string[] {
+  const found = new Set<string>();
+  for (const token of (value || "").split(",")) {
+    const head = token.trim().split(/\s+/)[0]?.slice(0, 3).toLowerCase() ?? "";
+    const canonical = WEEKDAY_ORDER.find((day) => day.toLowerCase() === head);
+    if (canonical) found.add(canonical);
+  }
+  return WEEKDAY_ORDER.filter((day) => found.has(day));
+}
+function isWeekdayStyle(value: string): boolean {
+  if (parseAttendanceDays(value).length) return false;
+  if (/odd|even/i.test(value)) return false;
+  return parseWeekdayNames(value).length > 0;
+}
+function shiftMonthKey(key: string, delta: number): string {
+  const [year, month] = key.split("-").map(Number);
+  const date = new Date(Date.UTC(year, (month ?? 1) - 1 + delta, 1));
+  return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}`;
+}
 type MessageItem = { id: number; recipient: string; channel: string; subject: string; body: string; status: string; created_at: string };
 type ActivityItem = { id: number; user_name: string; action: string; target: string; created_at: string };
 type DebtItem = { student_id: number; student_name: string; group_name: string; parent_name: string; parent_phone: string; current: number; overdue30: number; overdue60: number; overdue90: number; total: number; oldest_due: string };
@@ -136,9 +188,10 @@ const modules: Module[] = [
   "Attendance",
   "Exams",
   "Rooms",
-  "Payments",
+"Payments",
   "Invoices",
   "Debts",
+  "Billing",
   "Receipts",
 "Reports",
   "Messages",
@@ -156,9 +209,10 @@ const icons = {
   Attendance: ClipboardCheck,
   Exams: Award,
   Rooms: DoorOpen,
-  Payments: WalletCards,
+Payments: WalletCards,
   Invoices: FileText,
   Debts: TrendingUp,
+  Billing: Banknote,
   Receipts: Receipt,
 Reports: FileBarChart,
   Messages: MessageSquare,
@@ -240,8 +294,18 @@ const [loaded, setLoaded] = useState(false);
   const [generatingInvoices, setGeneratingInvoices] = useState(false);
   const [groupStudent, setGroupStudent] = useState<Student | null>(null);
   const [invoiceMonth, setInvoiceMonth] = useState<string>(new Date().toISOString().slice(0, 7));
+  const [billingMonth, setBillingMonth] = useState<string>(new Date().toISOString().slice(0, 7));
+  const [billing, setBilling] = useState<BillingData | null>(null);
+  const [monthSchedule, setMonthSchedule] = useState<ScheduleEvent[]>([]);
   const [staffModal, setStaffModal] = useState<{ mode: "create" } | { mode: "edit"; user: UserAccount } | null>(null);
   const [permissionRole, setPermissionRole] = useState<StaffRole | null>(null);
+  const [weatherTheme, setWeatherTheme] = useState<WeatherTheme>(() => {
+    const saved = localStorage.getItem("bp_weather_theme");
+    return saved === "winter" || saved === "rain" || saved === "autumn" ? saved : "none";
+  });
+  useEffect(() => {
+    localStorage.setItem("bp_weather_theme", weatherTheme);
+  }, [weatherTheme]);
 
   const isTeacher = currentUser?.role_name === "Teacher";
   const myStudents = isTeacher ? students.filter((student) => student.teacher_name === currentUser?.name) : students;
@@ -260,13 +324,15 @@ const [loaded, setLoaded] = useState(false);
       get("/api/groups").then((result) => { if (result) setGroups(result); }),
       get("/api/courses").then((result) => { if (result) setCourses(result); }),
       get("/api/rooms").then((result) => { if (result) setRooms(result); }),
-      get("/api/invoices").then((result) => { if (result) setInvoices(result); }),
+      get(`/api/invoices?month=${encodeURIComponent(invoiceMonth)}`).then((result) => { if (result) setInvoices(result); }),
       get("/api/exams").then((result) => { if (result) setExams(result); }),
       get("/api/messages").then((result) => { if (result) setMessages(result); }),
       get("/api/activity").then((result) => { if (result) setActivity(result); }),
-      get("/api/debts").then((result) => { if (result) setDebts(result); }),
+get("/api/debts").then((result) => { if (result) setDebts(result); }),
       get("/api/reports").then((result) => { if (result) setReports(result); }),
       get("/api/dashboard").then((result) => { if (result) setDashboard(result); }),
+      get(`/api/billing/${billingMonth}`).then((result) => { if (result) setBilling(result); }),
+      get(`/api/schedule/${billingMonth}`).then((result) => { if (Array.isArray(result)) setMonthSchedule(result); }),
     ]).catch(() => undefined);
   };
   useEffect(() => {
@@ -280,16 +346,29 @@ if (!me) {
           setLoaded(true);
           return;
         }
-        setCurrentUser(me.user);
+setCurrentUser(me.user);
         setMyPerms(new Set(me.permissions ?? []));
-        await loadData();
+        if (!me.user.must_change_password) await loadData();
         setLoaded(true);
       })
       .catch(() => setLoaded(true));
   }, []);
-  useEffect(() => {
-    if (loaded && currentUser) void Promise.all([fetch("/api/invoices").then((r) => r.ok ? r.json() : null).then((r) => r && setInvoices(r)), fetch("/api/dashboard").then((r) => r.ok ? r.json() : null).then((r) => r && setDashboard(r))]);
+useEffect(() => {
+    if (loaded && currentUser) void Promise.all([fetch(`/api/invoices?month=${encodeURIComponent(invoiceMonth)}`).then((r) => r.ok ? r.json() : null).then((r) => r && setInvoices(r)), fetch("/api/dashboard").then((r) => r.ok ? r.json() : null).then((r) => r && setDashboard(r))]);
   }, [invoiceMonth]);
+  useEffect(() => {
+    if (!loaded || !currentUser) return;
+    let alive = true;
+    void Promise.all([
+      fetch(`/api/billing/${billingMonth}`).then((r) => r.ok ? r.json() : null),
+      fetch(`/api/schedule/${billingMonth}`).then((r) => r.ok ? r.json() : null),
+    ]).then(([bill, schedule]) => {
+      if (!alive) return;
+      if (bill) setBilling(bill);
+      if (Array.isArray(schedule)) setMonthSchedule(schedule);
+    }).catch(() => undefined);
+    return () => { alive = false; };
+  }, [billingMonth, loaded, currentUser]);
   const filteredStudents = myStudents.filter((student) =>
     `${student.name} ${student.group_name} ${student.level}`
       .toLowerCase()
@@ -299,11 +378,11 @@ if (!me) {
     setActive(module);
     setMobileMenu(false);
   };
-  const applySession = (result: SessionResult) => {
+const applySession = (result: SessionResult) => {
 localStorage.setItem("bp_token", result.token);
     setCurrentUser(result.user);
     setMyPerms(new Set(result.permissions ?? []));
-    void loadData();
+    if (!result.user.must_change_password) void loadData();
   };
   const canView = (module: Module) => module === "Dashboard" || myPerms.size === 0 || myPerms.has(`${module.toLowerCase()}:view`);
   const canWriteAttendance = myPerms.size === 0 || myPerms.has("attendance:create");
@@ -316,16 +395,18 @@ localStorage.removeItem("bp_token");
     setLoginAccount(null);
   };
 
-  if (!loaded) return <div className="app-loading"><div className="brand"><div className="brand-mark">BP</div><div><strong>brightpath</strong><small>education centre</small></div></div><p className="muted">Loading workspace…</p></div>;
+  if (!loaded) return <div className="app-loading"><div className="brand"><div className="brand-mark"><img src="/logo.svg" alt="" /></div><div><strong>Harry School</strong><small>education centre</small></div></div><p className="muted">Loading workspace…</p></div>;
   if (!currentUser) return <LoginScreen onLogin={applySession} />;
+  if (currentUser.must_change_password) return <ChangePasswordScreen user={currentUser} onChanged={(user) => { setCurrentUser(user); setMyPerms(new Set()); void loadData(); }} onLogout={handleLogout} />;
 
   return (
     <div className="app-shell">
+      <WeatherEffects theme={weatherTheme} />
       <aside className={`sidebar ${mobileMenu ? "open" : ""}`}>
         <div className="brand">
-          <div className="brand-mark">BP</div>
+          <div className="brand-mark"><img src="/logo.svg" alt="" /></div>
           <div>
-            <strong>brightpath</strong>
+            <strong>Harry School</strong>
             <small>education centre</small>
           </div>
           <button className="close-menu" onClick={() => setMobileMenu(false)}>
@@ -379,16 +460,19 @@ localStorage.removeItem("bp_token");
             </div>
             <Bell size={19} />
             <button className="profile profile-button" onClick={() => setAccountMenu((open) => !open)}><div className="avatar">{(currentUser?.name ?? "Main Director").split(" ").map((part) => part[0]).join("").slice(0, 2)}</div><span>{currentUser?.name ?? "Main Director"}</span><ChevronDown size={15} /></button>
-            {accountMenu && <div className="account-menu"><strong>Switch account</strong>{users.map((account) => <button key={account.id} onClick={() => { setLoginAccount(account); setAccountMenu(false); }}>{account.name}<small>{account.role_name} · {account.phone}</small></button>)}<div className="account-menu-divider" /><button className="account-logout" onClick={handleLogout}><LogOut size={14} /> Log out</button></div>}
+            {accountMenu && <div className="account-menu"><strong>Season theme</strong><div className="theme-picker">{([["none", Sun, "Off"], ["winter", Snowflake, "Winter"], ["rain", CloudRain, "Rain"], ["autumn", Leaf, "Autumn"]] as const).map(([value, Icon, label]) => <button key={value} className={weatherTheme === value ? "active" : ""} onClick={() => setWeatherTheme(value)}><Icon size={15} />{label}</button>)}</div><div className="account-menu-divider" /><strong>Switch account</strong>{users.map((account) => <button key={account.id} onClick={() => { setLoginAccount(account); setAccountMenu(false); }}>{account.name}<small>{account.role_name} · {account.phone}</small></button>)}<div className="account-menu-divider" /><button className="account-logout" onClick={handleLogout}><LogOut size={14} /> Log out</button></div>}
           </div>
         </header>
         <div className="page-content">
           {profile ? <StudentProfile student={profile} teachers={teachers} groups={groups} payments={payments.filter((payment) => payment.student_id === profile.id || payment.student_name === profile.name)} close={() => setProfile(null)} onEdit={(student) => { setProfile(student); setStudents((items) => items.map((item) => item.id === student.id ? student : item)); void loadData(); }} onDelete={async () => { if (!window.confirm(`Delete ${profile.name}?`)) return; const response = await fetch(`/api/students/${profile.id}`, { method: "DELETE" }); if (response.ok) { setStudents((items) => items.filter((item) => item.id !== profile.id)); setProfile(null); void loadData(); } }} onPayment={() => setPaymentStudent(profile)} onAddGroup={() => setGroupStudent(profile)} onPrint={() => setPrintingReceipt({ student: profile, payment: payments.find((payment) => payment.student_id === profile.id || payment.student_name === profile.name) })} onDeletePayment={async (payment) => { if (!window.confirm(`Delete payment of ${money(payment.amount)} UZS for ${payment.student_name}?`)) return; const response = await fetch(`/api/payments/${payment.id}`, { method: "DELETE" }); if (response.ok) { setPayments((items) => items.filter((item) => item.id !== payment.id)); if (payment.student_id) { setStudents((items) => items.map((item) => item.id === payment.student_id ? { ...item, balance: item.balance - payment.amount } : item)); setProfile((current) => current && current.id === payment.student_id ? { ...current, balance: current.balance - payment.amount } : current); } void loadData(); } }} /> : selectedGroup ? <GroupPage group={selectedGroup} students={students.filter((student) => student.group_name === selectedGroup.name || selectedGroup.name.startsWith(student.group_name) || student.group_name.startsWith(selectedGroup.name.split(" /")[0]))} close={() => setSelectedGroup(null)} onStudentOpen={setProfile} onEdit={() => setEditingGroup(selectedGroup)} /> : selectedTeacher ? <TeacherPage teacher={selectedTeacher} groups={groups.filter((group) => group.teacher === selectedTeacher.name)} close={() => setSelectedTeacher(null)} onEdit={() => setEditingTeacher(selectedTeacher)} onGroupOpen={setSelectedGroup} /> : <>
-          {active === "Dashboard" && (
+{active === "Dashboard" && (
             <Dashboard
               students={myStudents}
               payments={myPayments}
               dashboard={dashboard}
+              billing={billing}
+              billingMonth={billingMonth}
+              onBillingMonthChange={setBillingMonth}
               showFinance={!isTeacher}
               userName={currentUser?.name ?? "Sarah"}
               onCreate={() => setModal("student")}
@@ -399,21 +483,25 @@ localStorage.removeItem("bp_token");
           {active === "Students" && (
             <StudentsPage
               students={filteredStudents}
+              groups={myGroups}
+              teachers={teachers}
+              billing={billing}
               onExport={() => void downloadCsv("students")}
               onCreate={() => setModal("student")}
               onOpen={setProfile}
             />
           )}
           {active === "Payments" && <PaymentsPage payments={myPayments} onRecord={() => setRecordPayment(true)} onExport={() => void downloadCsv("payments")} onEdit={setEditingPayment} onPrint={(payment) => setPrintingReceipt({ student: students.find((student) => student.id === payment.student_id || student.name === payment.student_name) ?? fallbackStudent(payment), payment })} onDelete={async (payment) => { if (!window.confirm(`Delete payment of ${money(payment.amount)} UZS for ${payment.student_name}?`)) return; const response = await fetch(`/api/payments/${payment.id}`, { method: "DELETE" }); if (response.ok) { setPayments((items) => items.filter((item) => item.id !== payment.id)); if (payment.student_id) setStudents((items) => items.map((item) => item.id === payment.student_id ? { ...item, balance: item.balance - payment.amount } : item)); void loadData(); } }} />}
-          {active === "Teachers" && <EntityPage title="Teachers" subtitle="Manage your teaching team and assigned groups." action={() => setModal("teacher")} actionLabel="Add teacher" columns={["Teacher", "Subject", "Groups", "Status"]} rows={teachers.map((teacher) => [teacher.name, teacher.subject || "Not set", String(teacher.groups_count), teacher.status])} onOpen={(index) => setSelectedTeacher(teachers[index])} onDelete={async (index) => { const teacher = teachers[index]; if (!window.confirm(`Delete ${teacher.name}?`)) return; const response = await fetch(`/api/teachers/${teacher.id}`, { method: "DELETE" }); if (response.ok) { setTeachers((items) => items.filter((item) => item.id !== teacher.id)); setStudents((items) => items.map((item) => item.teacher_name === teacher.name ? { ...item, teacher_name: "" } : item)); setGroups((items) => items.map((item) => item.teacher === teacher.name ? { ...item, teacher: "" } : item)); setSelectedTeacher(null); } }} />}
-          {active === "Groups" && <EntityPage title="Groups" subtitle="Manage rosters, teachers, schedules, and group status." action={() => setModal("group")} actionLabel="Add group" columns={["Group", "Course", "Teacher", "Room", "Days", "Time", "Students"]} rows={myGroups.map((group) => [group.name, group.course || "Not set", group.teacher || "Not assigned", group.room_name || "Not set", groupDays(group), group.schedule_time || "Not set", String(group.students_count)])} onOpen={(index) => setSelectedGroup(myGroups[index])} onDelete={async (index) => { const group = myGroups[index]; if (!window.confirm(`Delete ${group.name}?`)) return; const response = await fetch(`/api/groups/${group.id}`, { method: "DELETE" }); if (response.ok) setGroups((items) => items.filter((item) => item.id !== group.id)); }} onDeleteLabel="Delete group" />}
-          {active === "Courses" && <EntityPage title="Courses" subtitle="Manage the programmes and levels offered by your centre." action={() => setModal("course")} actionLabel="Add course" columns={["Course", "Level", "Price", "Students"]} rows={courses.map((course) => [course.name, course.level || "Not set", `${money(course.monthly_fee || 0)} UZS`, String(course.students_count)])} onEdit={(index) => setEditingCourse(courses[index])} onDelete={async (index) => { const course = courses[index]; if (!window.confirm(`Delete course "${course.name}"? Groups linked to it will lose this course.`)) return; const response = await fetch(`/api/courses/${course.id}`, { method: "DELETE" }); if (response.ok) { setCourses((items) => items.filter((item) => item.id !== course.id)); setGroups((items) => items.map((item) => item.course === course.name ? { ...item, course: "" } : item)); } }} onDeleteLabel="Delete course" />}
+          {active === "Teachers" && <EntityPage title="Teachers" subtitle="Manage your teaching team and assigned groups." action={() => setModal("teacher")} actionLabel="Add teacher" columns={["Teacher", "Subject", "Groups", "Status"]} rows={teachers.map((teacher) => [teacher.name, teacher.subject || "Not set", String(teacher.groups_count), teacher.status])} filters={[{ label: "Subject", options: toOptions(teachers.map((teacher) => teacher.subject)), test: (row, value) => row[1] === value }, { label: "Status", options: toOptions(teachers.map((teacher) => teacher.status)), test: (row, value) => row[3] === value }, { label: "Load", options: [{ value: "teaching", label: "Teaching groups" }, { value: "free", label: "No groups" }], test: (row, value) => (value === "teaching" ? Number(row[2]) > 0 : Number(row[2]) === 0) }]} onOpen={(index) => setSelectedTeacher(teachers[index])} onDelete={async (index) => { const teacher = teachers[index]; if (!window.confirm(`Delete ${teacher.name}?`)) return; const response = await fetch(`/api/teachers/${teacher.id}`, { method: "DELETE" }); if (response.ok) { setTeachers((items) => items.filter((item) => item.id !== teacher.id)); setStudents((items) => items.map((item) => item.teacher_name === teacher.name ? { ...item, teacher_name: "" } : item)); setGroups((items) => items.map((item) => item.teacher === teacher.name ? { ...item, teacher: "" } : item)); setSelectedTeacher(null); } }} />}
+          {active === "Groups" && <EntityPage title="Groups" subtitle="Manage rosters, teachers, schedules, and group status." action={() => setModal("group")} actionLabel="Add group" columns={["Group", "Course", "Teacher", "Room", "Days", "Time", "Students"]} rows={myGroups.map((group) => [group.name, group.course || "Not set", group.teacher || "Not assigned", group.room_name || "Not set", groupDays(group), group.schedule_time || "Not set", String(group.students_count)])} filters={[{ label: "Course", options: toOptions(myGroups.map((group) => group.course)), test: (row, value) => row[1] === value }, { label: "Teacher", options: toOptions(myGroups.map((group) => group.teacher)), test: (row, value) => row[2] === value }, { label: "Room", options: toOptions(myGroups.map((group) => group.room_name)), test: (row, value) => row[3] === value }, { label: "Days", options: dayBucketOptionsWithCounts(myGroups), test: (row, value) => dayBucketFromDisplay(row[4]) === value }]} onOpen={(index) => setSelectedGroup(myGroups[index])} onDelete={async (index) => { const group = myGroups[index]; if (!window.confirm(`Delete ${group.name}?`)) return; const response = await fetch(`/api/groups/${group.id}`, { method: "DELETE" }); if (response.ok) setGroups((items) => items.filter((item) => item.id !== group.id)); }} onDeleteLabel="Delete group" />}
+          {active === "Courses" && <EntityPage title="Courses" subtitle="Manage the programmes and levels offered by your centre." action={() => setModal("course")} actionLabel="Add course" columns={["Course", "Level", "Price", "Students"]} rows={courses.map((course) => [course.name, course.level || "Not set", `${money(course.monthly_fee || 0)} UZS`, String(course.students_count)])} filters={[{ label: "Level", options: toOptions(courses.map((course) => course.level)), test: (row, value) => row[1] === value }, { label: "Enrolment", options: [{ value: "active", label: "Has students" }, { value: "empty", label: "No students" }], test: (row, value) => (value === "active" ? Number(row[3]) > 0 : Number(row[3]) === 0) }]} onEdit={(index) => setEditingCourse(courses[index])} onDelete={async (index) => { const course = courses[index]; if (!window.confirm(`Delete course "${course.name}"? Groups linked to it will lose this course.`)) return; const response = await fetch(`/api/courses/${course.id}`, { method: "DELETE" }); if (response.ok) { setCourses((items) => items.filter((item) => item.id !== course.id)); setGroups((items) => items.map((item) => item.course === course.name ? { ...item, course: "" } : item)); } }} onDeleteLabel="Delete course" />}
           {active === "Schedule" && <SchedulePage groups={myGroups} onOpen={setSelectedGroup} onCreate={() => setModal("group")} />}
           {active === "Attendance" && <AttendanceModule groups={myGroups} students={myStudents} markUserName={currentUser?.name ?? ""} canWrite={canWriteAttendance} />}
           {active === "Exams" && <ExamsPage exams={exams} onAdd={() => setAddingExam(true)} onDelete={async (exam) => { if (!window.confirm("Delete this exam record?")) return; const response = await fetch(`/api/exams/${exam.id}`, { method: "DELETE" }); if (response.ok) setExams((items) => items.filter((item) => item.id !== exam.id)); }} />}
           {active === "Rooms" && <RoomsPage rooms={rooms} groups={groups} onAdd={() => setModal("room")} onEdit={setEditingRoom} onDelete={async (room) => { if (!window.confirm(`Delete room ${room.name}?`)) return; const response = await fetch(`/api/rooms/${room.id}`, { method: "DELETE" }); if (response.ok) { setRooms((items) => items.filter((item) => item.id !== room.id)); setGroups((items) => items.map((item) => item.room_name === room.name ? { ...item, room_name: "" } : item)); } }} />}
           {active === "Invoices" && <InvoicesPage month={invoiceMonth} setMonth={setInvoiceMonth} invoices={invoices} busy={generatingInvoices} onGenerate={async () => { if (!window.confirm(`Generate invoices for ${invoiceMonth}?`)) return; setGeneratingInvoices(true); const response = await fetch("/api/invoices/generate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ month: invoiceMonth }) }); setGeneratingInvoices(false); if (response.ok) { const result = await response.json(); window.alert(`Generated ${result.created} invoices for ${money(result.total)} UZS`); void loadData(); } }} onMarkPaid={async (invoice) => { const response = await fetch(`/api/invoices/${invoice.id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status: invoice.status === "paid" ? "unpaid" : "paid" }) }); if (response.ok) void loadData(); }} onDelete={async (invoice) => { if (!window.confirm("Delete this invoice?")) return; const response = await fetch(`/api/invoices/${invoice.id}`, { method: "DELETE" }); if (response.ok) void loadData(); }} onExport={() => void downloadCsv("invoices")} />}
-          {active === "Debts" && <DebtsPage debts={debts} students={students} onOpenStudent={setProfile} onNotify={async (debt) => { if (!debt.parent_phone) { window.alert("No parent phone is on file for this student."); return; } const response = await fetch("/api/messages/send", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ recipient: debt.parent_name || debt.student_name, channel: "SMS", subject: "Payment reminder", body: `Dear parent, there is an outstanding balance of ${money(debt.total)} UZS for ${debt.student_name}. Please settle it at your earliest convenience. BrightPath Education Centre.` }) }); if (response.ok) { window.alert(`Reminder sent to ${debt.parent_name || debt.student_name}`); void loadData(); } }} />}
+          {active === "Debts" && <DebtsPage debts={debts} students={students} onOpenStudent={setProfile} onNotify={async (debt) => { if (!debt.parent_phone) { window.alert("No parent phone is on file for this student."); return; } const response = await fetch("/api/messages/send", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ recipient: debt.parent_name || debt.student_name, channel: "SMS", subject: "Payment reminder", body: `Dear parent, there is an outstanding balance of ${money(debt.total)} UZS for ${debt.student_name}. Please settle it at your earliest convenience. Harry School.` }) }); if (response.ok) { window.alert(`Reminder sent to ${debt.parent_name || debt.student_name}`); void loadData(); } }} />}
+          {active === "Billing" && <BillingPage month={billingMonth} setMonth={setBillingMonth} billing={billing} schedule={monthSchedule} onOpenStudent={(bill) => { const target = students.find((student) => student.id === bill.student_id); if (target) setProfile(target); }} onRefresh={loadData} />}
           {active === "Receipts" && <ReceiptsPage payments={myPayments} onPrint={(payment) => setPrintingReceipt({ student: students.find((student) => student.id === payment.student_id || student.name === payment.student_name) ?? fallbackStudent(payment), payment })} />}
           {active === "Reports" && <ReportsPage reports={reports} onAdd={() => setAddingReport(true)} onToggleRead={async (report) => { const response = await fetch(`/api/reports/${report.id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ is_read: !report.is_read }) }); if (response.ok) void loadData(); }} onDelete={async (report) => { if (!window.confirm("Delete this report?")) return; const response = await fetch(`/api/reports/${report.id}`, { method: "DELETE" }); if (response.ok) void loadData(); }} />}
           {active === "Messages" && <MessagesPage messages={messages} onSend={() => setSendingMessage(true)} onDelete={async (message) => { if (!window.confirm("Delete this message?")) return; const response = await fetch(`/api/messages/${message.id}`, { method: "DELETE" }); if (response.ok) setMessages((items) => items.filter((item) => item.id !== message.id)); }} />}
@@ -455,7 +543,7 @@ localStorage.removeItem("bp_token");
       )}
       {editingPayment && <PaymentModal payment={editingPayment} close={() => setEditingPayment(null)} onSaved={(result) => { if (result.student_id) { setStudents((items) => items.map((item) => item.id === result.student_id ? { ...item, balance: item.balance + result.delta } : item)); setProfile((current) => current && current.id === result.student_id ? { ...current, balance: current.balance + result.delta } : current); } setEditingPayment(null); void loadData(); }} />}
       {editingTeacher && <TeacherEditModal teacher={editingTeacher} close={() => setEditingTeacher(null)} onSaved={(teacher) => { setTeachers((items) => items.map((item) => item.id === teacher.id ? teacher : item)); setSelectedTeacher(teacher); setEditingTeacher(null); }} />}
-      {editingGroup && <GroupEditModal group={editingGroup} teachers={teachers} rooms={rooms} close={() => setEditingGroup(null)} onSaved={(group) => { setGroups((items) => items.map((item) => item.id === group.id ? group : item)); setSelectedGroup(group); setEditingGroup(null); }} />}
+      {editingGroup && <GroupEditModal group={editingGroup} teachers={teachers} rooms={rooms} allGroups={groups} close={() => setEditingGroup(null)} onSaved={(group) => { setGroups((items) => items.map((item) => item.id === group.id ? group : item)); setSelectedGroup(group); setEditingGroup(null); }} />}
         {editingCourse && <CourseEditModal course={editingCourse} close={() => setEditingCourse(null)} onSaved={(course) => { const previousName = editingCourse.name; setCourses((items) => items.map((item) => item.id === course.id ? course : item)); if (course.name !== previousName) setGroups((items) => items.map((item) => item.course === previousName ? { ...item, course: course.name } : item)); setEditingCourse(null); }} />}
         {editingRoom && <RoomEditModal room={editingRoom} close={() => setEditingRoom(null)} onSaved={(room) => { setRooms((items) => items.map((item) => item.id === room.id ? { ...item, ...room, groups: item.groups } : item)); setEditingRoom(null); }} />}
         {addingExam && <ExamModal students={students} close={() => setAddingExam(false)} onSaved={(exam) => { void loadData(); setAddingExam(false); if (exam) setExams((items) => [exam, ...items].slice(0, 200)); }} />}
@@ -474,6 +562,9 @@ function Dashboard({
   students,
   payments,
   dashboard,
+  billing,
+  billingMonth,
+  onBillingMonthChange,
   showFinance,
   userName,
   onCreate,
@@ -483,6 +574,9 @@ function Dashboard({
   students: Student[];
   payments: Payment[];
   dashboard: DashboardData | null;
+  billing: BillingData | null;
+  billingMonth: string;
+  onBillingMonthChange: (month: string) => void;
   showFinance: boolean;
   userName: string;
   onCreate: () => void;
@@ -511,7 +605,7 @@ function Dashboard({
       <PageHeading
         eyebrow={eyebrow}
         title={`${greeting}, ${userName.split(" ")[0] ?? "Sarah"} ✦`}
-        subtitle="Here is what's happening at BrightPath today."
+        subtitle="Here is what's happening at Harry School today."
         action={
           <button className="primary-button" onClick={onCreate}>
             <Plus size={17} /> Add student
@@ -562,8 +656,21 @@ function Dashboard({
             icon={<UserRound />}
             color="red"
           />
-        )}
+)}
       </div>
+      {showFinance && (
+        <section className="panel page-panel billing-panel">
+          <div className="panel-head">
+            <div>
+              <h2>Monthly billing</h2>
+              <p className="muted">Automatic calendar-driven bills, debts and revenue for the selected month</p>
+            </div>
+            <MonthNav month={billingMonth} onChange={onBillingMonthChange} />
+          </div>
+          <BillingSummaryStats billing={billing} />
+          <DebtorsTable debtors={billing?.debtors ?? []} onOpenStudent={() => onNavigate("Billing")} />
+        </section>
+      )}
       <div className="dashboard-grid">
         {showFinance ? (
           <section className="panel revenue-panel">
@@ -661,6 +768,151 @@ function Dashboard({
     </>
   );
 }
+function MonthNav({ month, onChange }: { month: string; onChange: (month: string) => void }) {
+  const label = new Date(Date.UTC(Number(month.slice(0, 4)), Number(month.slice(5, 7)) - 1, 1)).toLocaleString("en-US", { timeZone: "UTC", month: "long", year: "numeric" });
+  return (
+    <div className="month-nav">
+      <button type="button" className="month-nav-btn" aria-label="Previous month" onClick={() => onChange(shiftMonthKey(month, -1))}><ChevronLeft size={17} /></button>
+      <input type="month" value={month} onChange={(event) => onChange(event.target.value || month)} />
+      <span className="month-nav-label">{label}</span>
+      <button type="button" className="month-nav-btn" aria-label="Next month" onClick={() => onChange(shiftMonthKey(month, 1))}><ChevronRight size={17} /></button>
+    </div>
+  );
+}
+const BILL_STATUS_TEXT: Record<BillStatus, string> = { paid: "Paid", partially_paid: "Partially paid", debtor: "Debtor" };
+const BILL_STATUS_PILL: Record<BillStatus, string> = { paid: "paid", partially_paid: "partial", debtor: "balance-due" };
+function BillingSummaryStats({ billing }: { billing: BillingData | null }) {
+  const summary = billing?.summary;
+  return (
+    <div className="stat-grid billing-stats">
+      <Stat label="Students billed" value={summary ? String(summary.total_students) : "…"} icon={<Users />} color="teal" />
+      <Stat label="Expected revenue" value={summary ? `${money(summary.expected_revenue)} UZS` : "…"} icon={<Banknote />} color="orange" />
+      <Stat label="Paid" value={summary ? `${money(summary.paid)} UZS` : "…"} icon={<WalletCards />} color="blue" />
+      <Stat label="Outstanding debt" value={summary ? `${money(summary.outstanding)} UZS` : "…"} icon={<AlertTriangle />} color="red" />
+    </div>
+  );
+}
+function DebtorsTable({ debtors, onOpenStudent }: { debtors: BillRecord[]; onOpenStudent: (student: BillRecord) => void }) {
+  const total = debtors.reduce((sum, bill) => sum + bill.remaining_amount, 0);
+  const rows = debtors.slice(0, 8);
+  return (
+    <div className="debtors-block">
+      <div className="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>Student</th>
+              <th>Group</th>
+              <th>Course</th>
+              <th>Course price</th>
+              <th>Paid</th>
+              <th>Remaining debt</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.length ? rows.map((bill) => (
+              <tr key={bill.id} className="clickable-row" onClick={() => onOpenStudent(bill)}>
+                <td><strong>{bill.student_name}</strong></td>
+                <td>{bill.group_name || "Not assigned"}</td>
+                <td>{bill.course_name || "—"}</td>
+                <td>{money(bill.monthly_price)} UZS</td>
+                <td>{money(bill.paid_amount)} UZS</td>
+                <td className="balance-due"><strong>{money(bill.remaining_amount)} UZS</strong></td>
+                <td><span className={`status-pill ${BILL_STATUS_PILL[bill.status]}`}>{BILL_STATUS_TEXT[bill.status]}</span></td>
+              </tr>
+            )) : <tr><td colSpan={7}>No debtors for this month — everyone is paid up.</td></tr>}
+          </tbody>
+        </table>
+      </div>
+      <p className="muted panel-total">Month debt: <strong>{money(total)} UZS</strong>{debtors.length > rows.length ? ` · showing first ${rows.length} of ${debtors.length} debtors` : ""}</p>
+    </div>
+  );
+}
+function BillingPage({ month, setMonth, billing, schedule, onOpenStudent, onRefresh }: { month: string; setMonth: (month: string) => void; billing: BillingData | null; schedule: ScheduleEvent[]; onOpenStudent: (student: BillRecord) => void; onRefresh: () => void }) {
+  const [busy, setBusy] = useState(false);
+  const grouped = schedule.reduce<Record<string, ScheduleEvent[]>>((acc, event) => {
+    (acc[event.date] ??= []).push(event);
+    return acc;
+  }, {});
+  const dates = Object.keys(grouped).sort();
+  return (
+    <>
+      <PageHeading
+        eyebrow="Finance"
+        title="Monthly billing"
+        subtitle="Calendar-driven lesson schedule, monthly bills, debtors and collected revenue."
+        action={
+          <div className="heading-actions">
+            <MonthNav month={month} onChange={setMonth} />
+            <button className="secondary-button" disabled={busy} onClick={async () => { setBusy(true); try { const response = await fetch("/api/billing/generate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ month }) }); if (response.ok) { const result = await response.json(); window.alert(`Billing ensured for ${month}: ${result.created} new bill${result.created === 1 ? "" : "s"}`); onRefresh(); } } finally { setBusy(false); } }}>
+              <RotateCcw size={15} /> {busy ? "Generating…" : "Generate/month"}
+            </button>
+          </div>
+        }
+      />
+      <BillingSummaryStats billing={billing} />
+      <div className="billing-grid">
+        <section className="panel table-panel page-panel">
+          <div className="panel-head">
+            <div>
+              <h2>Billing ledger</h2>
+              <p className="muted">{billing ? `All ${billing.summary.total_students} students · ${billing.debtors.length} debtor(s) · ${billing.month_key}` : "Loading…"}</p>
+            </div>
+          </div>
+          <div className="table-scroll">
+            <table>
+              <thead>
+                <tr><th>Student</th><th>Group</th><th>Course</th><th>Course price</th><th>Paid</th><th>Remaining debt</th><th>Status</th></tr>
+              </thead>
+              <tbody>
+                {(billing?.students ?? []).map((bill) => (
+                  <tr key={bill.id} className="clickable-row" onClick={() => onOpenStudent(bill)}>
+                    <td><strong>{bill.student_name}</strong></td>
+                    <td>{bill.group_name || "Not assigned"}</td>
+                    <td>{bill.course_name || "—"}</td>
+                    <td>{money(bill.monthly_price)} UZS</td>
+                    <td>{money(bill.paid_amount)} UZS</td>
+                    <td className={bill.remaining_amount > 0 ? "balance-due" : "balance-clear"}>{bill.remaining_amount > 0 ? `${money(bill.remaining_amount)} UZS` : "—"}</td>
+                    <td><span className={`status-pill ${BILL_STATUS_PILL[bill.status]}`}>{BILL_STATUS_TEXT[bill.status]}</span></td>
+                  </tr>
+                ))}
+                {!billing && <tr><td colSpan={7}>Loading billing records…</td></tr>}
+              </tbody>
+            </table>
+          </div>
+        </section>
+        <section className="panel table-panel page-panel">
+          <div className="panel-head">
+            <div>
+              <h2>Lesson schedule</h2>
+              <p className="muted">Real calendar dates generated from each group's lesson days</p>
+            </div>
+          </div>
+          <div className="table-scroll">
+            <table>
+              <thead>
+                <tr><th>Date</th><th>Day</th><th>Group</th><th>Course</th><th>Time</th><th>Room</th></tr>
+              </thead>
+              <tbody>
+                {dates.length ? dates.map((date) => grouped[date].map((event, index) => (
+                  <tr key={`${event.group_id}-${date}`}>
+                    {index === 0 && <td rowSpan={grouped[date].length}><strong>{date.slice(8, 10)}</strong> <span className="muted">{date}</span></td>}
+                    {index === 0 && <td rowSpan={grouped[date].length}><span className="status-pill paid">{event.weekday}</span></td>}
+                    <td><strong>{event.group_name}</strong></td>
+                    <td>{event.course || "—"}</td>
+                    <td>{event.schedule_time || "—"}</td>
+                    <td>{event.room_name || "—"}</td>
+                  </tr>
+                ))) : <tr><td colSpan={6}>No lessons generated for this month.</td></tr>}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+    </>
+  );
+}
 function PageHeading({
   eyebrow,
   title,
@@ -716,17 +968,175 @@ function Stat({
     </div>
   );
 }
+type DayBucket = "odd" | "even" | "every" | "unassigned";
+const DAY_BUCKET_LABEL: Record<DayBucket, string> = {
+  odd: "Odd days",
+  even: "Even days",
+  every: "Every day",
+  unassigned: "Unassigned",
+};
+const DAY_BUCKET_OPTIONS: FilterOption[] = (Object.keys(DAY_BUCKET_LABEL) as DayBucket[]).map((bucket) => ({
+  value: bucket,
+  label: DAY_BUCKET_LABEL[bucket],
+}));
+function findGroupForStudent(groupName: string, groups: Group[]): Group | undefined {
+  const name = (groupName || "").trim().toLowerCase();
+  if (!name) return undefined;
+  return (
+    groups.find((group) => group.name.trim().toLowerCase() === name) ??
+    groups.find((group) => group.name.trim().toLowerCase().split(" /")[0] === name.split(" /")[0])
+  );
+}
+function dayBucketFor(rawDays: string): DayBucket {
+  const raw = (rawDays || "").trim();
+  if (!raw) return "unassigned";
+  const numbers = parseAttendanceDays(raw);
+  if (numbers.length) {
+    if (numbers.every((day) => day % 2 === 1)) return "odd";
+    if (numbers.every((day) => day % 2 === 0)) return "even";
+    return "every";
+  }
+  if (/odd/i.test(raw)) return "odd";
+  if (/even/i.test(raw)) return "even";
+  if (parseWeekdayNames(raw).length) return "every";
+  return "unassigned";
+}
+function dayBucketOptionsWithCounts(groups: Group[]): FilterOption[] {
+  const counts: Record<DayBucket, number> = { odd: 0, even: 0, every: 0, unassigned: 0 };
+  for (const group of groups) counts[dayBucketFor(group.schedule_days || group.schedule)] += 1;
+  return DAY_BUCKET_OPTIONS.map((option) => {
+    const bucket = option.value as DayBucket;
+    return { ...option, label: `${DAY_BUCKET_LABEL[bucket]} (${counts[bucket]})`, disabled: counts[bucket] === 0 };
+  });
+}
+function dayBucketFromDisplay(text: string): DayBucket {
+  const raw = (text || "").trim();
+  if (!raw || /^not set$/i.test(raw)) return "unassigned";
+  const legacy = /(\d+)\s+days?\s*·\s*(\d+)\s+odd,\s*(\d+)\s+even/i.exec(raw);
+  if (legacy) {
+    const odd = Number(legacy[2]);
+    const even = Number(legacy[3]);
+    if (odd && !even) return "odd";
+    if (even && !odd) return "even";
+    return "every";
+  }
+  return dayBucketFor(raw);
+}
+const ATTENDANCE_BANDS: { value: string; label: string; min: number; max: number }[] = [
+  { value: "excellent", label: "90% and above", min: 90, max: 101 },
+  { value: "good", label: "75% – 89%", min: 75, max: 90 },
+  { value: "fair", label: "50% – 74%", min: 50, max: 75 },
+  { value: "poor", label: "Below 50%", min: -1, max: 50 },
+];
+const ATTENDANCE_BAND_OPTIONS: FilterOption[] = [
+  ...ATTENDANCE_BANDS.map((band) => ({ value: band.value, label: band.label })),
+  { value: "unmarked", label: "No attendance yet" },
+];
 function StudentsPage({
   students,
+  groups,
+  teachers,
+  billing,
   onExport,
   onCreate,
   onOpen,
 }: {
   students: Student[];
+  groups: Group[];
+  teachers: Teacher[];
+  billing: BillingData | null;
   onExport: () => void;
   onCreate: () => void;
   onOpen: (student: Student) => void;
 }) {
+  const f = useFilters({
+    query: "",
+    level: "",
+    payment: "",
+    teacher: "",
+    group: "",
+    attendance: "",
+    balance: "",
+    days: [] as DayBucket[],
+  });
+  const { values, set, reset, active } = f;
+
+  const billByStudent = useMemo(() => {
+    const map = new Map<number, BillRecord>();
+    for (const bill of billing?.students ?? []) map.set(bill.student_id, bill);
+    return map;
+  }, [billing]);
+
+  const levelOptions = useMemo(() => toOptions(students.map((s) => s.level)), [students]);
+  const teacherOptions = useMemo(
+    () => toOptions([...students.map((s) => s.teacher_name), ...teachers.map((t) => t.name)]),
+    [students, teachers],
+  );
+  const groupOptions = useMemo(() => toOptions(students.map((s) => s.group_name)), [students]);
+
+  const dayCounts = useMemo(() => {
+    const counts: Record<DayBucket, number> = { odd: 0, even: 0, every: 0, unassigned: 0 };
+    for (const student of students) {
+      const group = findGroupForStudent(student.group_name, groups);
+      counts[dayBucketFor(group ? group.schedule_days || group.schedule : "")] += 1;
+    }
+    return counts;
+  }, [students, groups]);
+  const dayOptions = useMemo(
+    () => DAY_BUCKET_OPTIONS.map((option) => {
+      const bucket = option.value as DayBucket;
+      const count = dayCounts[bucket];
+      return { ...option, hint: String(count), disabled: count === 0 && !values.days.includes(bucket) };
+    }),
+    [dayCounts, values.days],
+  );
+
+  const groupOf = useMemo(() => {
+    const map = new Map<number, DayBucket>();
+    for (const student of students) {
+      const group = findGroupForStudent(student.group_name, groups);
+      map.set(student.id, dayBucketFor(group ? group.schedule_days || group.schedule : ""));
+    }
+    return map;
+  }, [students, groups]);
+
+  const filtered = useMemo(() => {
+    return students.filter((student) => {
+      if (!matchesText([student.name, student.phone, student.parent_name, student.parent_phone, student.group_name, student.teacher_name, student.level], values.query)) return false;
+      if (values.level && (student.level || "") !== values.level) return false;
+      if (values.teacher && (student.teacher_name || "") !== values.teacher) return false;
+      if (values.group && (student.group_name || "") !== values.group) return false;
+      if (values.payment) {
+        const bill = billByStudent.get(student.id);
+        if (values.payment === "no_bill") {
+          if (bill) return false;
+        } else if (!bill || bill.status !== values.payment) {
+          return false;
+        }
+      }
+      if (values.attendance) {
+        const hasRecords = (student.sessions ?? 0) > 0;
+        if (values.attendance === "unmarked") {
+          if (hasRecords) return false;
+        } else {
+          const band = ATTENDANCE_BANDS.find((item) => item.value === values.attendance);
+          if (!hasRecords || !band) return false;
+          if (student.attendance < band.min || student.attendance >= band.max) return false;
+        }
+      }
+      if (values.balance) {
+        if (values.balance === "owes" && student.balance >= 0) return false;
+        if (values.balance === "settled" && student.balance !== 0) return false;
+        if (values.balance === "credit" && student.balance <= 0) return false;
+      }
+      if (values.days.length) {
+        const bucket = groupOf.get(student.id) ?? "unassigned";
+        if (!values.days.includes(bucket)) return false;
+      }
+      return true;
+    });
+  }, [students, values, billByStudent, groupOf]);
+
   return (
     <>
       <PageHeading
@@ -744,9 +1154,46 @@ function StudentsPage({
           </div>
         }
       />
+      <FilterBar>
+        <FilterSearch
+          value={values.query}
+          onChange={(value) => set("query", value)}
+          placeholder="Name, phone or parent…"
+        />
+        <FilterSelect label="Level" value={values.level} onChange={(value) => set("level", value)} options={levelOptions} allLabel="All levels" />
+        <FilterSelect
+          label="Payment"
+          value={values.payment}
+          onChange={(value) => set("payment", value)}
+          allLabel="Any"
+          options={[
+            { value: "paid", label: "Paid in full" },
+            { value: "partially_paid", label: "Partially paid" },
+            { value: "debtor", label: "Debtor" },
+            { value: "no_bill", label: "No bill this month" },
+          ]}
+        />
+        <FilterSelect label="Teacher" value={values.teacher} onChange={(value) => set("teacher", value)} options={teacherOptions} allLabel="All teachers" />
+        <FilterSelect label="Group" value={values.group} onChange={(value) => set("group", value)} options={groupOptions} allLabel="All groups" />
+        <FilterSelect label="Attendance" value={values.attendance} onChange={(value) => set("attendance", value)} options={ATTENDANCE_BAND_OPTIONS} allLabel="Any rate" />
+        <FilterSelect
+          label="Balance"
+          value={values.balance}
+          onChange={(value) => set("balance", value)}
+          allLabel="Any balance"
+          options={[
+            { value: "owes", label: "Owes money" },
+            { value: "settled", label: "Settled" },
+            { value: "credit", label: "In credit" },
+          ]}
+        />
+        <FilterChips label="Lesson days" options={dayOptions} selected={values.days} onChange={(next) => set("days", next as DayBucket[])} />
+        <FilterSpacer />
+        {active && <FilterReset onClick={reset} />}
+      </FilterBar>
       <section className="panel table-panel page-panel">
         <PanelHead
-          title={`All students (${students.length})`}
+          title={panelCount("All students", filtered.length, students.length, active)}
           subtitle="Click a student to open their profile"
         />
         <div className="table-scroll">
@@ -757,45 +1204,65 @@ function StudentsPage({
                 <th>Level</th>
                 <th>Teacher</th>
                 <th>Group</th>
+                <th>Days</th>
                 <th>Attendance</th>
+                <th>Payment</th>
                 <th>Balance</th>
               </tr>
             </thead>
             <tbody>
-              {students.map((student) => (
-                <tr
-                  key={student.id}
-                  className="clickable-row"
-                  onClick={() => onOpen(student)}
-                >
-                  <td>
-                    <div className="table-person">
-                      <div className="avatar small">
-                        {student.name
-                          .split(" ")
-                          .map((part) => part[0])
-                          .join("")
-                          .slice(0, 2)}
-                      </div>
-                      <div>
-                        <strong>{student.name}</strong>
-                        <small>{student.phone}</small>
-                      </div>
-                    </div>
-                  </td>
-                  <td>{student.level || "Not set"}</td>
-                  <td>{student.teacher_name || "Not assigned"}</td>
-                  <td>{student.group_name || "Not assigned"}</td>
-                  <td>{student.attendance}%</td>
-                  <td
-                    className={
-                      student.balance < 0 ? "balance-due" : "balance-clear"
-                    }
+              {filtered.map((student) => {
+                const bill = billByStudent.get(student.id);
+                return (
+                  <tr
+                    key={student.id}
+                    className="clickable-row"
+                    onClick={() => onOpen(student)}
                   >
-                    {student.balance < 0 ? `-${money(-student.balance)} UZS` : student.balance > 0 ? `+${money(student.balance)} UZS` : "Paid"}
-                  </td>
-                </tr>
-              ))}
+                    <td>
+                      <div className="table-person">
+                        <div className="avatar small">
+                          {student.name
+                            .split(" ")
+                            .map((part) => part[0])
+                            .join("")
+                            .slice(0, 2)}
+                        </div>
+                        <div>
+                          <strong>{student.name}</strong>
+                          <small>{student.phone}</small>
+                        </div>
+                      </div>
+                    </td>
+                    <td>{student.level || "Not set"}</td>
+                    <td>{student.teacher_name || "Not assigned"}</td>
+                    <td>{student.group_name || "Not assigned"}</td>
+                    <td>{DAY_BUCKET_LABEL[groupOf.get(student.id) ?? "unassigned"]}</td>
+                    <td>{(student.sessions ?? 0) > 0 ? `${student.attendance}%` : "—"}</td>
+                    <td>
+                      {bill ? (
+                        <span className={`status-pill ${BILL_STATUS_PILL[bill.status]}`}>
+                          {BILL_STATUS_TEXT[bill.status]}
+                        </span>
+                      ) : (
+                        <span className="muted">No bill</span>
+                      )}
+                    </td>
+                    <td
+                      className={
+                        student.balance < 0 ? "balance-due" : "balance-clear"
+                      }
+                    >
+                      {student.balance < 0 ? `-${money(-student.balance)} UZS` : student.balance > 0 ? `+${money(student.balance)} UZS` : "Paid"}
+                    </td>
+                  </tr>
+                );
+              })}
+              {!filtered.length && (
+                <FilterEmpty colSpan={8}>
+                  No students match the current filters.
+                </FilterEmpty>
+              )}
             </tbody>
           </table>
         </div>
@@ -838,6 +1305,22 @@ function PaymentTable({ payments, onEdit, onPrint, onDelete }: { payments: Payme
   );
 }
 function PaymentsPage({ payments, onRecord, onExport, onEdit, onPrint, onDelete }: { payments: Payment[]; onRecord: () => void; onExport: () => void; onEdit: (payment: Payment) => void; onPrint: (payment: Payment) => void; onDelete?: (payment: Payment) => void | Promise<void> }) {
+  const { values, set, reset, active } = useFilters({ query: "", method: "", month: "" });
+  const methodOptions = useMemo(() => toOptions(payments.map((p) => p.method)), [payments]);
+  const monthOptions = useMemo(
+    () => [...new Set(payments.map((p) => (p.paid_at || "").slice(0, 7)))].filter(Boolean).sort().reverse().map((m) => ({ value: m, label: m })),
+    [payments],
+  );
+  const filtered = useMemo(
+    () => payments.filter((payment) => {
+      if (!matchesText([payment.student_name, payment.method, payment.status, payment.paid_at], values.query)) return false;
+      if (values.method && payment.method !== values.method) return false;
+      if (values.month && !(payment.paid_at || "").startsWith(values.month)) return false;
+      return true;
+    }),
+    [payments, values],
+  );
+  const total = filtered.reduce((sum, payment) => sum + payment.amount, 0);
   return (
     <>
       <PageHeading
@@ -855,18 +1338,113 @@ function PaymentsPage({ payments, onRecord, onExport, onEdit, onPrint, onDelete 
           </div>
         }
       />
+      <FilterBar>
+        <FilterSearch value={values.query} onChange={(value) => set("query", value)} placeholder="Student, method or status…" />
+        <FilterSelect label="Method" value={values.method} onChange={(value) => set("method", value)} options={methodOptions} allLabel="All methods" />
+        <FilterSelect label="Month" value={values.month} onChange={(value) => set("month", value)} options={monthOptions} allLabel="All months" />
+        <FilterSpacer />
+        {active && <FilterReset onClick={reset} />}
+      </FilterBar>
       <section className="panel table-panel page-panel">
         <PanelHead
-          title="Payment transactions"
-          subtitle="All recent payments"
+          title={panelCount("Payment transactions", filtered.length, payments.length, active)}
+          subtitle={`Collected ${money(total)} UZS across the current selection`}
         />
-        <PaymentTable payments={payments} onEdit={onEdit} onPrint={onPrint} onDelete={onDelete} />
+        {filtered.length ? (
+          <PaymentTable payments={filtered} onEdit={onEdit} onPrint={onPrint} onDelete={onDelete} />
+        ) : (
+          <div className="table-scroll">
+            <table>
+              <tbody>
+                <FilterEmpty colSpan={7}>No payments match the current filters.</FilterEmpty>
+              </tbody>
+            </table>
+          </div>
+        )}
       </section>
     </>
   );
 }
-function EntityPage({ title, subtitle, action, actionLabel, columns, rows, onOpen, onEdit, onDelete, onDeleteLabel = "Delete" }: { title: string; subtitle: string; action: () => void; actionLabel: string; columns: string[]; rows: string[][]; onOpen?: (index: number) => void; onEdit?: (index: number) => void; onDelete?: (index: number) => void | Promise<void>; onDeleteLabel?: string }) {
-  return <><PageHeading eyebrow="BrightPath workspace" title={title} subtitle={subtitle} action={<button className="primary-button" onClick={action}><Plus size={17} /> {actionLabel}</button>} /><section className="panel table-panel page-panel"><PanelHead title={`${title} (${rows.length})`} subtitle={onOpen ? "Click a row to open its page" : "Saved records from your centre"} /><div className="table-scroll"><table><thead><tr>{columns.map((column) => <th key={column}>{column}</th>)}{(onEdit || onDelete) && <th>Actions</th>}</tr></thead><tbody>{rows.map((row, index) => <tr className={onOpen ? "clickable-row" : undefined} key={`${row[0]}-${index}`} onClick={() => onOpen?.(index)}>{row.map((cell, cellIndex) => <td key={`${cell}-${cellIndex}`}>{cell}</td>)}{(onEdit || onDelete) && <td className="row-actions">{onEdit && <button className="secondary-button table-action" title="Edit" onClick={(event) => { event.stopPropagation(); onEdit(index) }}><Pencil size={13} /></button>}{onDelete && <button className="danger-button table-action" title={onDeleteLabel} onClick={(event) => { event.stopPropagation(); void onDelete(index) }}><Trash2 size={15} /></button>}</td>}</tr>)}</tbody></table></div></section></>
+type EntityFilter = {
+  label: string;
+  allLabel?: string;
+  options: FilterOption[];
+  test: (row: string[], value: string) => boolean;
+};
+function EntityPage({ title, subtitle, action, actionLabel, columns, rows, filters, emptyLabel = "No records saved yet.", onOpen, onEdit, onDelete, onDeleteLabel = "Delete" }: { title: string; subtitle: string; action: () => void; actionLabel: string; columns: string[]; rows: string[][]; filters?: EntityFilter[]; emptyLabel?: string; onOpen?: (index: number) => void; onEdit?: (index: number) => void; onDelete?: (index: number) => void | Promise<void>; onDeleteLabel?: string }) {
+  const { values, set, reset, active } = useFilters<{ query: string; picked: Record<string, string> }>({ query: "", picked: {} });
+  const filteredIndexes = rows
+    .map((row, index) => ({ row, index }))
+    .filter(({ row }) => {
+      if (!matchesText(row, values.query)) return false;
+      return (filters ?? []).every((filter) => {
+        const picked = values.picked[filter.label];
+        return !picked || filter.test(row, picked);
+      });
+    })
+    .map((entry) => entry.index);
+  const visible = new Set(filteredIndexes);
+  return (
+    <>
+      <PageHeading
+        eyebrow="Harry School workspace"
+        title={title}
+        subtitle={subtitle}
+        action={<button className="primary-button" onClick={action}><Plus size={17} /> {actionLabel}</button>}
+      />
+      {!!filters?.length && (
+        <FilterBar>
+          <FilterSearch value={values.query} onChange={(value) => set("query", value)} placeholder={`Search ${title.toLowerCase()}…`} />
+          {filters.map((filter) => (
+            <FilterSelect
+              key={filter.label}
+              label={filter.label}
+              value={values.picked[filter.label] ?? ""}
+              onChange={(value) => set("picked", { ...values.picked, [filter.label]: value })}
+              options={filter.options}
+              allLabel={filter.allLabel ?? `All ${filter.label.toLowerCase()}`}
+            />
+          ))}
+          <FilterSpacer />
+          {active && <FilterReset onClick={reset} />}
+        </FilterBar>
+      )}
+      <section className="panel table-panel page-panel">
+        <PanelHead
+          title={panelCount(title, filteredIndexes.length, rows.length, active)}
+          subtitle={onOpen ? "Click a row to open its page" : "Saved records from your centre"}
+        />
+        <div className="table-scroll">
+          <table>
+            <thead>
+              <tr>
+                {columns.map((column) => <th key={column}>{column}</th>)}
+                {(onEdit || onDelete) && <th>Actions</th>}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row, index) => visible.has(index) && (
+                <tr className={onOpen ? "clickable-row" : undefined} key={`${row[0]}-${index}`} onClick={() => onOpen?.(index)}>
+                  {row.map((cell, cellIndex) => <td key={`${cell}-${cellIndex}`}>{cell}</td>)}
+                  {(onEdit || onDelete) && (
+                    <td className="row-actions">
+                      {onEdit && <button className="secondary-button table-action" title="Edit" onClick={(event) => { event.stopPropagation(); onEdit(index) }}><Pencil size={13} /></button>}
+                      {onDelete && <button className="danger-button table-action" title={onDeleteLabel} onClick={(event) => { event.stopPropagation(); void onDelete(index) }}><Trash2 size={15} /></button>}
+                    </td>
+                  )}
+                </tr>
+              ))}
+              {!filteredIndexes.length && (
+                <FilterEmpty colSpan={columns.length + ((onEdit || onDelete) ? 1 : 0)}>
+                  {active ? `No ${title.toLowerCase()} match the current filters.` : emptyLabel}
+                </FilterEmpty>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </>
+  );
 }
 function TeacherPage({ teacher, groups, close, onEdit, onGroupOpen }: { teacher: Teacher; groups: Group[]; close: () => void; onEdit: () => void; onGroupOpen: (group: Group) => void }) {
   return <div className="student-profile-page"><div className="profile-page-head"><button className="secondary-button" onClick={close}>← Back to teachers</button><span className="status-pill paid">{teacher.status}</span></div><PageHeading eyebrow="Teacher workspace" title={teacher.name} subtitle={teacher.subject || "Subject not set"} action={<button className="secondary-button" onClick={onEdit}>Edit teacher</button>} /><div className="profile-summary"><div><span>Subject</span><strong>{teacher.subject || "Not set"}</strong></div><div><span>Assigned groups</span><strong>{groups.length}</strong></div><div><span>Total students</span><strong>{groups.reduce((total, group) => total + group.students_count, 0)}</strong></div><div><span>Status</span><strong>{teacher.status}</strong></div></div><section className="panel table-panel page-panel"><PanelHead title={`Groups taught by ${teacher.name}`} subtitle="Click a group to open its page" /><div className="table-scroll"><table><thead><tr><th>Group</th><th>Course</th><th>Schedule</th><th>Time</th><th>Students</th></tr></thead><tbody>{groups.length ? groups.map((group) => <tr className="clickable-row" key={group.id} onClick={() => onGroupOpen(group)}><td><strong>{group.name}</strong></td><td>{group.course || "Not set"}</td><td>{groupDays(group)}</td><td>{group.schedule_time || "Not set"}</td><td>{group.students_count}</td></tr>) : <tr><td colSpan={5}>No groups are assigned to this teacher yet.</td></tr>}</tbody></table></div></section></div>
@@ -1067,11 +1645,12 @@ function CreateModal({
         ["password", "Temporary password"],
       ],
     },
-    room: {
+room: {
       title: "Add room",
       endpoint: "rooms",
       fields: [
         ["name", "Room name"],
+        ["number", "Room number"],
         ["capacity", "Capacity (seats)"],
         ["location", "Location"],
         ["status", "Status"],
@@ -1107,9 +1686,9 @@ function CreateModal({
 onSubmit={async (event) => {
           event.preventDefault();
           if (config.endpoint === "groups") {
-            const attendanceDays = parseAttendanceDays(values["schedule_days"] ?? "");
-            if (attendanceDays.length !== 12) {
-              setError(`Select exactly 12 attendance days (odd/even mix) before saving this group.`);
+            const weekdays = parseWeekdayNames(values["schedule_days"] ?? "");
+            if (!weekdays.length) {
+              setError(`Pick at least one lesson day (Mon–Sun) before saving this group.`);
               return;
             }
           }
@@ -1127,7 +1706,7 @@ onSubmit={async (event) => {
       >
         <div className="modal-head">
           <div>
-            <p className="eyebrow">BrightPath records</p>
+            <p className="eyebrow">Harry School records</p>
             <h2>{config.title}</h2>
           </div>
           <button type="button" className="more-button" onClick={close}>
@@ -1137,7 +1716,9 @@ onSubmit={async (event) => {
 {config.fields.map(([key, label]) => (
           <label key={key}>
             {label}
-            {key === "schedule_days" ? (
+            {key === "schedule_days" && config.endpoint === "groups" ? (
+              <WeekdayPicker value={values[key] ?? ""} onChange={(next) => updateField(key, next)} />
+            ) : key === "schedule_days" ? (
               <AttendanceDaysPicker value={values[key] ?? ""} onChange={(next) => updateField(key, next)} />
             ) : options[key] ? (
               <select
@@ -1160,7 +1741,13 @@ onSubmit={async (event) => {
               />
             )}
           </label>
-        ))}
+))}
+        {config.endpoint === "groups" && values.room_name && (() => {
+          const room = rooms.find((item) => item.name === values.room_name);
+          const hint = room ? `${room.number ? `No. ${room.number} · ` : ""}${room.location || "no location"} · ${room.capacity} seats` : "";
+          const conflicts = groups.filter((item) => item.name !== values.name && item.status === "Active" && item.room_name === values.room_name && scheduleOverlap(values.schedule_days ?? "", item.schedule_days));
+          return <div className="group-hint"><small>Room: {hint}</small>{conflicts.length ? <small className="warn">Careful — already scheduled here: {conflicts.map((group) => group.name).join(", ")} (overlapping days).</small> : null}</div>;
+        })()}
         {error && <p className="form-error">{error}</p>}
         <div className="modal-actions">
           <button type="button" className="secondary-button" onClick={close}>
@@ -1200,8 +1787,9 @@ function StudentProfile({
   onPrint: () => void;
   onDeletePayment?: (payment: Payment) => void;
 }) {
-  const [editing, setEditing] = useState(false);
+const [editing, setEditing] = useState(false);
   const [finance, setFinance] = useState<StudentFinance | null>(null);
+  const [billingHistory, setBillingHistory] = useState<{ bills: BillRecord[]; payments: Payment[] } | null>(null);
   const [values, setValues] = useState({
     name: student.name,
     phone: student.phone,
@@ -1224,6 +1812,7 @@ function StudentProfile({
     }
   };
   useEffect(() => { fetch(`/api/students/${student.id}/finance`).then((response) => response.ok ? response.json() : null).then(setFinance).catch(() => undefined); }, [student.id, student.group_name, student.teacher_name, student.balance]);
+  useEffect(() => { fetch(`/api/billing/student/${student.id}`).then((response) => response.ok ? response.json() : null).then(setBillingHistory).catch(() => undefined); }, [student.id, student.group_name, student.balance]);
   return (
     <div className="student-profile-page">
       <div className="profile-page-head"><button className="secondary-button" onClick={close}>← Back to students</button><button className="secondary-button" onClick={() => window.print()}><Receipt size={16} /> Print receipt</button></div>
@@ -1338,6 +1927,7 @@ function StudentProfile({
               </button>
             </div>
             <section className="profile-payments"><PanelHead title="Payment history" subtitle="Payments recorded for this student" /><PaymentTable payments={payments} onDelete={onDeletePayment} /></section>
+            <section className="profile-payments"><PanelHead title="Monthly billing history" subtitle="Calendar-driven bills per month — prices are snapshots at billing time" /><div className="table-scroll"><table><thead><tr><th>Month</th><th>Course price</th><th>Paid</th><th>Remaining debt</th><th>Status</th></tr></thead><tbody>{billingHistory?.bills.length ? billingHistory.bills.map((bill) => <tr key={bill.id}><td><strong>{bill.month_key ?? `${bill.year}-${String(bill.month).padStart(2, "0")}`}</strong></td><td>{money(bill.monthly_price)} UZS</td><td>{money(bill.paid_amount)} UZS</td><td className={bill.remaining_amount > 0 ? "balance-due" : "balance-clear"}>{bill.remaining_amount > 0 ? `${money(bill.remaining_amount)} UZS` : "—"}</td><td><span className={`status-pill ${BILL_STATUS_PILL[bill.status]}`}>{BILL_STATUS_TEXT[bill.status]}</span></td></tr>) : <tr><td colSpan={5}>No monthly bills yet — they are created automatically each month.</td></tr>}</tbody></table></div></section>
           </>
         )}
       </div>
@@ -1354,7 +1944,7 @@ function ReceiptPrint({ student, payment, operatorName, onDone }: { student: Stu
   const receiptNumber = payment ? `№${String(payment.id).padStart(7, "0")}` : "№0000000";
   const date = payment?.paid_at || new Date().toLocaleDateString("en-GB");
   const amount = payment ? `${money(payment.amount)} UZS` : "-";
-  return <div className="receipt-print-layer"><article className="receipt-paper"><div className="receipt-logo"><span>BP</span></div><div className="receipt-brand">BRIGHTPATH<small>EDUCATION CENTRE</small></div><div className="receipt-number">{receiptNumber}</div><div className="receipt-rule" /><dl><dt>Check number</dt><dd>{receiptNumber}</dd><dt>Company</dt><dd>BrightPath Education Centre</dd><dt>Branch</dt><dd>Main branch</dd><dt>Student</dt><dd>{student.name}</dd><dt>Phone</dt><dd>{student.phone || "-"}</dd><dt>Group</dt><dd>{student.group_name || "-"}</dd><dt>Course price</dt><dd>{amount}</dd><dt>Teacher</dt><dd>{student.teacher_name || "-"}</dd><dt>Type</dt><dd>Tuition payment</dd><dt>Method</dt><dd>{payment?.method || "Cash"}</dd><dt>Payment amount</dt><dd>{amount}</dd><dt>Date</dt><dd>{date}</dd></dl><div className="receipt-footer"><strong>Creator: {operatorName}</strong><span>Cashier: {operatorName}</span><span>Time: {new Date().toLocaleString("en-GB", { hour: "2-digit", minute: "2-digit" })}</span><em>Thank you for choosing BrightPath</em></div></article></div>;
+  return <div className="receipt-print-layer"><article className="receipt-paper"><div className="receipt-logo"><img src="/logo-light.svg" alt="" /></div><div className="receipt-brand">HARRY SCHOOL<small>EDUCATION CENTRE</small></div><div className="receipt-number">{receiptNumber}</div><div className="receipt-rule" /><dl><dt>Check number</dt><dd>{receiptNumber}</dd><dt>Company</dt><dd>Harry School</dd><dt>Branch</dt><dd>Main branch</dd><dt>Student</dt><dd>{student.name}</dd><dt>Phone</dt><dd>{student.phone || "-"}</dd><dt>Group</dt><dd>{student.group_name || "-"}</dd><dt>Course price</dt><dd>{amount}</dd><dt>Teacher</dt><dd>{student.teacher_name || "-"}</dd><dt>Type</dt><dd>Tuition payment</dd><dt>Method</dt><dd>{payment?.method || "Cash"}</dd><dt>Payment amount</dt><dd>{amount}</dd><dt>Date</dt><dd>{date}</dd></dl><div className="receipt-footer"><strong>Creator: {operatorName}</strong><span>Cashier: {operatorName}</span><span>Time: {new Date().toLocaleString("en-GB", { hour: "2-digit", minute: "2-digit" })}</span><em>Thank you for choosing Harry School</em></div></article></div>;
 }
 
 function GroupAssignmentModal({ student, groups, close, onSaved }: { student: Student; groups: Group[]; close: () => void; onSaved: (student: Student) => void }) {
@@ -1382,25 +1972,89 @@ function LoginScreen({ onLogin }: { onLogin: (result: SessionResult) => void }) 
   return (
     <div className="login-page">
       <form className="login-card" onSubmit={async (event) => { event.preventDefault(); setBusy(true); setError(""); try { const response = await fetch("/api/auth/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ phone, password }) }); const result = await response.json(); if (!response.ok) { setError(result.message ?? "Invalid phone number or password"); return; } onLogin(result); } catch { setError("Unable to reach the server"); } finally { setBusy(false); } }}>
-        <div className="brand login-brand"><div className="brand-mark">BP</div><div><strong>brightpath</strong><small>education centre</small></div></div>
+        <div className="brand login-brand"><div className="brand-mark"><img src="/logo.svg" alt="" /></div><div><strong>Harry School</strong><small>education centre</small></div></div>
         <p className="eyebrow">Please log in</p>
         <h1 className="login-title">Welcome back</h1>
         <p className="muted">Sign in with your staff phone number and password to continue.</p>
         <label>Phone or email<input required value={phone} onChange={(event) => setPhone(event.target.value)} autoFocus /></label>
         <label>Password<input required type="password" value={password} onChange={(event) => setPassword(event.target.value)} /></label>
         {error && <p className="form-error">{error}</p>}
-        <button className="primary-button login-submit" type="submit" disabled={busy}>{busy ? "Signing in…" : "Sign in"}</button>
+<button className="primary-button login-submit" type="submit" disabled={busy}>{busy ? "Signing in…" : "Sign in"}</button>
       </form>
     </div>
   );
 }
-function GroupEditModal({ group, teachers, rooms, close, onSaved }: { group: Group; teachers: Teacher[]; rooms: Room[]; close: () => void; onSaved: (group: Group) => void }) {
-  const [values, setValues] = useState({ name: group.name, course: group.course, teacher: group.teacher, room_name: group.room_name, schedule_days: initAttendanceDays(group.schedule_days), schedule_time: group.schedule_time });
+function ChangePasswordScreen({ user, onChanged, onLogout }: { user: UserAccount; onChanged: (user: UserAccount) => void; onLogout: () => void }) {
+  const [current, setCurrent] = useState("");
+  const [next, setNext] = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const policy = ["At least 10 characters", "Upper and lower case letters", "At least one number", "At least one symbol (!@#…)"];
+  return (
+    <div className="login-page">
+      <form className="login-card" onSubmit={async (event) => { event.preventDefault(); if (next !== confirm) { setError("New passwords do not match."); return; } setBusy(true); setError(""); try { const response = await fetch("/api/auth/change-password", { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${localStorage.getItem("bp_token")}` }, body: JSON.stringify({ current_password: current, new_password: next }) }); const result = await response.json(); if (!response.ok) { setError(result.message ?? "Unable to update password"); return; } onChanged(result.user); } catch { setError("Unable to reach the server"); } finally { setBusy(false); } }}>
+        <div className="brand login-brand"><div className="brand-mark"><img src="/logo.svg" alt="" /></div><div><strong>Harry School</strong><small>education centre</small></div></div>
+        <p className="eyebrow">Welcome, {user.name}</p>
+        <h1 className="login-title">Set a new password</h1>
+        <p className="muted">For your security, you must replace the temporary password before continuing.</p>
+        <label>Current password<input required type="password" value={current} onChange={(event) => setCurrent(event.target.value)} autoFocus /></label>
+        <label>New password<input required type="password" value={next} onChange={(event) => setNext(event.target.value)} /></label>
+        <label>Confirm new password<input required type="password" value={confirm} onChange={(event) => setConfirm(event.target.value)} /></label>
+        {error && <p className="form-error">{error}</p>}
+        <ul className="password-policy">{policy.map((item) => <li key={item}>{item}</li>)}</ul>
+        <button className="primary-button login-submit" type="submit" disabled={busy}>{busy ? "Updating…" : "Update password"}</button>
+        <button type="button" className="password-logout" onClick={onLogout}>Log out instead</button>
+      </form>
+    </div>
+  );
+}
+function WeekdayPicker({ value, onChange }: { value: string; onChange: (value: string) => void }) {
+  const selected = new Set(parseWeekdayNames(value));
+  const toggle = (day: string) => {
+    const next = new Set(selected);
+    if (next.has(day)) next.delete(day); else next.add(day);
+    onChange(WEEKDAY_ORDER.filter((item) => next.has(item)).join(", "));
+  };
+  return (
+    <div className="weekday-picker">
+      {WEEKDAY_ORDER.map((day) => (
+        <button key={day} type="button" className={selected.has(day) ? "selected" : ""} onClick={() => toggle(day)}>
+          {day}
+        </button>
+      ))}
+    </div>
+  );
+}
+function GroupEditModal({ group, teachers, rooms, allGroups, close, onSaved }: { group: Group; teachers: Teacher[]; rooms: Room[]; allGroups: Group[]; close: () => void; onSaved: (group: Group) => void }) {
+  const [values, setValues] = useState({ name: group.name, course: group.course, teacher: group.teacher, room_name: group.room_name, schedule_days: group.schedule_days, schedule_time: group.schedule_time });
+  const [dayMode, setDayMode] = useState<"weekday" | "legacy">(isWeekdayStyle(group.schedule_days) ? "weekday" : "legacy");
   const [error, setError] = useState("");
   const times = Array.from({ length: 12 }, (_, index) => { const hour = index + 8; return `${hour > 12 ? hour - 12 : hour}:00 ${hour >= 12 ? "PM" : "AM"}`; });
-  return <div className="modal-backdrop"><form className="modal" onSubmit={async (event) => { event.preventDefault(); const attendanceDays = parseAttendanceDays(values.schedule_days); if (attendanceDays.length > 0 && attendanceDays.length !== 12) { setError("Attendance days must be exactly 12 (odd/even mix)."); return; } 
-
-const response = await fetch(`/api/groups/${group.id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(values) }); if (!response.ok) { setError((await response.json()).message ?? "Unable to update group"); return; } onSaved(await response.json()); }}><div className="modal-head"><div><p className="eyebrow">Group records</p><h2>Edit group</h2></div><button type="button" className="more-button" onClick={close}><X size={19} /></button></div><label>Group name<input required value={values.name} onChange={(event) => setValues({ ...values, name: event.target.value })} /></label><label>Course<input value={values.course} onChange={(event) => setValues({ ...values, course: event.target.value })} /></label><label>Teacher<select value={values.teacher} onChange={(event) => setValues({ ...values, teacher: event.target.value })}><option value="">No teacher</option>{teachers.map((teacher) => <option key={teacher.id}>{teacher.name}</option>)}</select></label><label>Room<select value={values.room_name} onChange={(event) => setValues({ ...values, room_name: event.target.value })}><option value="">No room</option>{rooms.map((room) => <option key={room.id} value={room.name}>{room.name} {room.capacity ? `· ${room.capacity} seats` : ""}</option>)}</select></label><label>Days<AttendanceDaysPicker value={values.schedule_days} onChange={(next) => setValues({ ...values, schedule_days: next })} /></label><label>Time<select value={values.schedule_time} onChange={(event) => setValues({ ...values, schedule_time: event.target.value })}><option value="">Not set</option>{times.map((time) => <option key={time}>{time}</option>)}</select></label>{error && <p className="form-error">{error}</p>}<div className="modal-actions"><button type="button" className="secondary-button" onClick={close}>Cancel</button><button className="primary-button" type="submit">Save changes</button></div></form></div>;
+  return <div className="modal-backdrop"><form className="modal" onSubmit={async (event) => { event.preventDefault();
+    if (dayMode === "weekday") {
+      if (!parseWeekdayNames(values.schedule_days).length) { setError("Pick at least one lesson day (Mon–Sun) before saving this group."); return; }
+    } else {
+      const attendanceDays = parseAttendanceDays(values.schedule_days);
+      if (attendanceDays.length > 0 && attendanceDays.length !== 12) { setError("Attendance days must be exactly 12 (odd/even mix)."); return; }
+    }
+    const response = await fetch(`/api/groups/${group.id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(values) }); if (!response.ok) { setError((await response.json()).message ?? "Unable to update group"); return; } onSaved(await response.json()); }}><div className="modal-head"><div><p className="eyebrow">Group records</p><h2>Edit group</h2></div><button type="button" className="more-button" onClick={close}><X size={19} /></button></div><label>Group name<input required value={values.name} onChange={(event) => setValues({ ...values, name: event.target.value })} /></label><label>Course<input value={values.course} onChange={(event) => setValues({ ...values, course: event.target.value })} /></label><label>Teacher<select value={values.teacher} onChange={(event) => setValues({ ...values, teacher: event.target.value })}><option value="">No teacher</option>{teachers.map((teacher) => <option key={teacher.id}>{teacher.name}</option>)}</select></label><label>Room<select value={values.room_name} onChange={(event) => setValues({ ...values, room_name: event.target.value })}><option value="">No room</option>{rooms.map((room) => <option key={room.id} value={room.name}>{room.name} {room.number ? `No. ${room.number} · ` : ""}{room.capacity ? `${room.capacity} seats` : ""}</option>)}</select></label>
+<div className="day-mode-toggle"><button type="button" className={dayMode === "weekday" ? "active" : ""} onClick={() => { const weekdays = parseWeekdayNames(values.schedule_days); const inline = weekdays.join(", "); if (values.schedule_days !== inline && values.schedule_days !== inline.replace(/, /g, ", ")) setValues({ ...values, schedule_days: inline }); setDayMode("weekday"); }}>Weekly (Mon–Sun)</button><button type="button" className={dayMode === "legacy" ? "active" : ""} onClick={() => { if (isWeekdayStyle(values.schedule_days)) setValues({ ...values, schedule_days: "" }); setDayMode("legacy"); }}>Odd/even day calendar</button></div>
+{dayMode === "weekday" ? <WeekdayPicker value={values.schedule_days} onChange={(next) => setValues({ ...values, schedule_days: next })} /> : <AttendanceDaysPicker value={values.schedule_days} onChange={(next) => setValues({ ...values, schedule_days: next })} />}
+<label>Time<select value={values.schedule_time} onChange={(event) => setValues({ ...values, schedule_time: event.target.value })}><option value="">Not set</option>{times.map((time) => <option key={time}>{time}</option>)}</select></label>
+{(() => {
+          const warnings: string[] = [];
+          const room = values.room_name ? rooms.find((item) => item.name === values.room_name) : null;
+          if (room && group.students_count > room.capacity) warnings.push(`Capacity is only ${room.capacity} seats, but this group has ${group.students_count} students.`);
+          if (values.room_name) {
+            const sameTime = allGroups.filter((item) => item.id !== group.id && item.status === "Active" && item.room_name === values.room_name && scheduleOverlap(values.schedule_days, item.schedule_days) && values.schedule_time === item.schedule_time);
+            const sameRoomOthers = allGroups.filter((item) => item.id !== group.id && item.status === "Active" && item.room_name === values.room_name && scheduleOverlap(values.schedule_days, item.schedule_days));
+            if (sameTime.length) warnings.push(`Also booked at ${values.schedule_time}: ${sameTime.map((g) => g.name).join(", ")}.`);
+            else if (sameRoomOthers.length) warnings.push(`Also scheduled here on overlapping days: ${sameRoomOthers.map((g) => g.name).join(", ")}.`);
+          }
+          return warnings.length ? <p className="group-hint warn">{warnings.join(" ")}</p> : <p className="group-hint">All clear — no conflicts with other groups.</p>;
+        })()}
+{error && <p className="form-error">{error}</p>}<div className="modal-actions"><button type="button" className="secondary-button" onClick={close}>Cancel</button><button className="primary-button" type="submit">Save changes</button></div></form></div>;
 }
 function CourseEditModal({ course, close, onSaved }: { course: Course; close: () => void; onSaved: (course: Course) => void }) {
   const [values, setValues] = useState({ name: course.name, level: course.level, monthly_fee: String(course.monthly_fee || 0) });
@@ -1499,9 +2153,18 @@ function PaymentModal({
 }
 function ReceiptsPage({ payments, onPrint }: { payments: Payment[]; onPrint: (payment: Payment) => void }) {
   const now = new Date().toISOString().slice(0, 7);
-  const [month, setMonth] = useState(now);
-  const months = Array.from(new Set(payments.map((p) => (p.paid_at || "").slice(0, 7)))).sort().reverse();
-  const filtered = payments.filter((p) => (p.paid_at || "").startsWith(month));
+  const { values, set, reset, active } = useFilters({ query: "", method: "", month: now });
+  const months = [...new Set(payments.map((p) => (p.paid_at || "").slice(0, 7)))].filter(Boolean).sort().reverse();
+  const methodOptions = useMemo(() => toOptions(payments.map((p) => p.method)), [payments]);
+  const filtered = useMemo(
+    () => payments.filter((p) => {
+      if (!matchesText([p.student_name, p.method, p.paid_at], values.query)) return false;
+      if (values.method && p.method !== values.method) return false;
+      if (values.month && !(p.paid_at || "").startsWith(values.month)) return false;
+      return true;
+    }),
+    [payments, values],
+  );
   const total = filtered.reduce((sum, p) => sum + p.amount, 0);
   return (
     <>
@@ -1511,19 +2174,32 @@ function ReceiptsPage({ payments, onPrint }: { payments: Payment[]; onPrint: (pa
         subtitle="Browse issued receipts and reprint any document for parents."
         action={
           <div className="filter-row">
-            <select className="attendance-select" value={month} onChange={(event) => setMonth(event.target.value)}>
-              {months.length ? months.map((m) => <option key={m} value={m}>{m}</option>) : <option value={now}>{now}</option>}
-            </select>
+            <button className="secondary-button" onClick={() => set("month", values.month)} disabled={!values.month}>
+              <CalendarDays size={15} /> This month
+            </button>
           </div>
         }
       />
+      <FilterBar>
+        <FilterSearch value={values.query} onChange={(value) => set("query", value)} placeholder="Receipt, student or method…" />
+        <FilterSelect label="Method" value={values.method} onChange={(value) => set("method", value)} options={methodOptions} allLabel="All methods" />
+        <FilterSelect
+          label="Month"
+          value={values.month}
+          onChange={(value) => set("month", value)}
+          allLabel="All months"
+          options={(months.length ? months : [now]).map((m) => ({ value: m, label: m }))}
+        />
+        <FilterSpacer />
+        {active && <FilterReset onClick={reset} />}
+      </FilterBar>
       <div className="stat-grid">
         <Stat label="Receipts this month" value={String(filtered.length)} icon={<Receipt />} color="teal" />
         <Stat label="Total issued" value={`${money(total)} UZS`} icon={<WalletCards />} color="orange" />
       </div>
       <section className="panel table-panel page-panel">
-        <PanelHead title={`Receipts (${filtered.length})`} subtitle="Click print to re-issue a receipt" />
-        <PaymentTable payments={filtered} onPrint={onPrint} />
+        <PanelHead title={panelCount("Receipts", filtered.length, payments.length, active)} subtitle="Click print to re-issue a receipt" />
+        {filtered.length ? <PaymentTable payments={filtered} onPrint={onPrint} /> : <div className="table-scroll"><table><tbody><FilterEmpty colSpan={6}>No receipts match the current filters.</FilterEmpty></tbody></table></div>}
       </section>
     </>
   );
@@ -1562,7 +2238,21 @@ function ReportsPage({ reports, onAdd, onToggleRead, onDelete }: { reports: Repo
 }
 
 function DebtsPage({ debts, students, onOpenStudent, onNotify }: { debts: DebtItem[]; students: Student[]; onOpenStudent: (student: Student) => void; onNotify: (debt: DebtItem) => void }) {
-  const total = debts.reduce((sum, debt) => sum + debt.total, 0);
+  const { values, set, reset, active } = useFilters({ query: "", ageing: "", contact: "" });
+  const filtered = useMemo(
+    () => debts.filter((debt) => {
+      if (!matchesText([debt.student_name, debt.parent_name, debt.parent_phone, debt.group_name, debt.oldest_due], values.query)) return false;
+      if (values.ageing === "30" && !(debt.overdue30 > 0)) return false;
+      if (values.ageing === "60" && !(debt.overdue60 > 0)) return false;
+      if (values.ageing === "90" && !(debt.overdue90 > 0)) return false;
+      if (values.ageing === "current" && !(debt.current > 0)) return false;
+      if (values.contact === "reachable" && !debt.parent_phone) return false;
+      if (values.contact === "unreachable" && debt.parent_phone) return false;
+      return true;
+    }),
+    [debts, values],
+  );
+  const total = filtered.reduce((sum, debt) => sum + debt.total, 0);
   const findStudent = (debt: DebtItem) => students.find((student) => student.id === debt.student_id);
   return (
     <>
@@ -1572,8 +2262,38 @@ function DebtsPage({ debts, students, onOpenStudent, onNotify }: { debts: DebtIt
         subtitle="Outstanding balances with ageing — chase late payments before they grow."
         action={<p className="panel-total">Total owed: <strong>{money(total)} UZS</strong></p>}
       />
+      <FilterBar>
+        <FilterSearch value={values.query} onChange={(value) => set("query", value)} placeholder="Student, parent or group…" />
+        <FilterSelect
+          label="Ageing"
+          value={values.ageing}
+          onChange={(value) => set("ageing", value)}
+          allLabel="Any age"
+          options={[
+            { value: "current", label: "Not yet due" },
+            { value: "30", label: "30+ days late" },
+            { value: "60", label: "60+ days late" },
+            { value: "90", label: "90+ days late" },
+          ]}
+        />
+        <FilterSelect
+          label="Contact"
+          value={values.contact}
+          onChange={(value) => set("contact", value)}
+          allLabel="Anyone"
+          options={[
+            { value: "reachable", label: "Parent phone on file" },
+            { value: "unreachable", label: "No parent phone" },
+          ]}
+        />
+        <FilterSpacer />
+        {active && <FilterReset onClick={reset} />}
+      </FilterBar>
       <section className="panel table-panel page-panel">
-        <PanelHead title={`Ledger (${debts.length} students)`} subtitle="Click a student to open their profile" />
+        <PanelHead
+          title={panelCount("Ledger", filtered.length, debts.length, active)}
+          subtitle="Click a student to open their profile"
+        />
         <div className="table-scroll">
           <table>
             <thead>
@@ -1589,7 +2309,7 @@ function DebtsPage({ debts, students, onOpenStudent, onNotify }: { debts: DebtIt
               </tr>
             </thead>
             <tbody>
-              {debts.length ? debts.map((debt) => (
+              {filtered.map((debt) => (
                 <tr key={debt.student_id}>
                   <td><div className="table-person"><div className="avatar small">{debt.student_name.split(" ").map((p) => p[0]).join("").slice(0, 2)}</div><div><strong>{debt.student_name}</strong><small>{debt.parent_name || "No parent on file"}</small></div></div></td>
                   <td>{debt.group_name || "Not assigned"}</td>
@@ -1605,7 +2325,8 @@ function DebtsPage({ debts, students, onOpenStudent, onNotify }: { debts: DebtIt
                     </button>
                   </td>
                 </tr>
-              )) : <tr><td colSpan={8}>No outstanding debts. Great!</td></tr>}
+              ))}
+              {!filtered.length && <FilterEmpty colSpan={8}>{active ? "No debts match the current filters." : "No outstanding debts. Great!"}</FilterEmpty>}
             </tbody>
           </table>
         </div>
@@ -1615,8 +2336,18 @@ function DebtsPage({ debts, students, onOpenStudent, onNotify }: { debts: DebtIt
 }
 
 function InvoicesPage({ month, setMonth, invoices, busy, onGenerate, onMarkPaid, onDelete, onExport }: { month: string; setMonth: (m: string) => void; invoices: Invoice[]; busy: boolean; onGenerate: () => void; onMarkPaid: (invoice: Invoice) => void; onDelete: (invoice: Invoice) => void; onExport: () => void }) {
-  const unpaidTotal = invoices.filter((invoice) => invoice.status === "unpaid").reduce((sum, invoice) => sum + invoice.amount, 0);
-  const paidTotal = invoices.filter((invoice) => invoice.status === "paid").reduce((sum, invoice) => sum + invoice.amount, 0);
+  const { values, set, reset, active } = useFilters({ query: "", status: "" });
+  const filtered = useMemo(
+    () => invoices.filter((invoice) => {
+      if (!matchesText([invoice.student_name, invoice.status, invoice.issue_date, invoice.due_date], values.query)) return false;
+      if (values.status && invoice.status !== values.status) return false;
+      return true;
+    }),
+    [invoices, values],
+  );
+  const unpaidTotal = filtered.filter((invoice) => invoice.status === "unpaid").reduce((sum, invoice) => sum + invoice.amount, 0);
+  const paidTotal = filtered.filter((invoice) => invoice.status === "paid").reduce((sum, invoice) => sum + invoice.amount, 0);
+  const statusOptions = useMemo(() => toOptions(invoices.map((invoice) => invoice.status)), [invoices]);
   return (
     <>
       <PageHeading
@@ -1634,19 +2365,26 @@ function InvoicesPage({ month, setMonth, invoices, busy, onGenerate, onMarkPaid,
           </div>
         }
       />
+      <FilterBar>
+        <label className="fx-field">
+          <span className="fx-label">Billing month</span>
+          <input className="attendance-date" type="month" value={month} onChange={(event) => setMonth(event.target.value)} aria-label="Billing month" />
+        </label>
+        <FilterSearch value={values.query} onChange={(value) => set("query", value)} placeholder="Student or due date…" />
+        <FilterSelect label="Status" value={values.status} onChange={(value) => set("status", value)} options={statusOptions} allLabel="All statuses" />
+        <FilterSpacer />
+        {active && <FilterReset onClick={reset} />}
+      </FilterBar>
       <div className="stat-grid">
-        <Stat label="Invoices this month" value={String(invoices.length)} icon={<FileText />} color="teal" />
+        <Stat label="Invoices this month" value={String(filtered.length)} icon={<FileText />} color="teal" />
         <Stat label="Unpaid" value={`${money(unpaidTotal)} UZS`} icon={<AlertTriangle />} color="red" />
         <Stat label="Collected" value={`${money(paidTotal)} UZS`} icon={<WalletCards />} color="blue" />
       </div>
       <section className="panel table-panel page-panel">
-        <div className="panel-head">
-          <div>
-            <h2>Month</h2>
-            <p className="muted">Filter invoices by billing period</p>
-          </div>
-          <input className="attendance-date" type="month" value={month} onChange={(event) => setMonth(event.target.value)} />
-        </div>
+        <PanelHead
+          title={panelCount("Invoices", filtered.length, invoices.length, active)}
+          subtitle={`Billing period ${month} · generate to bill students automatically`}
+        />
         <div className="table-scroll">
           <table>
             <thead>
@@ -1660,7 +2398,7 @@ function InvoicesPage({ month, setMonth, invoices, busy, onGenerate, onMarkPaid,
               </tr>
             </thead>
             <tbody>
-              {invoices.length ? invoices.map((invoice) => (
+              {filtered.map((invoice) => (
                 <tr key={invoice.id}>
                   <td><strong>{invoice.student_name}</strong></td>
                   <td>{money(invoice.amount)} UZS</td>
@@ -1672,7 +2410,8 @@ function InvoicesPage({ month, setMonth, invoices, busy, onGenerate, onMarkPaid,
                     <button className="danger-button table-action" onClick={() => onDelete(invoice)}><Trash2 size={14} /></button>
                   </td>
                 </tr>
-              )) : <tr><td colSpan={6}>No invoices for this month. Generate them to bill students automatically.</td></tr>}
+              ))}
+              {!filtered.length && <FilterEmpty colSpan={6}>No invoices match the current filters. Generate them to bill students automatically.</FilterEmpty>}
             </tbody>
           </table>
         </div>
@@ -1682,7 +2421,25 @@ function InvoicesPage({ month, setMonth, invoices, busy, onGenerate, onMarkPaid,
 }
 
 function ExamsPage({ exams, onAdd, onDelete }: { exams: Exam[]; onAdd: () => void; onDelete: (exam: Exam) => void }) {
+  const { values, set, reset, active } = useFilters({ query: "", examType: "", level: "", result: "" });
   const levels = Array.from(new Set(exams.map((exam) => exam.level || "General"))).filter(Boolean);
+  const levelOptions = useMemo(() => toOptions(exams.map((exam) => exam.level || "General")), [exams]);
+  const typeOptions = useMemo(() => toOptions(exams.map((exam) => exam.exam_type)), [exams]);
+  const filtered = useMemo(
+    () => exams.filter((exam) => {
+      const percent = (exam.score / Math.max(exam.max_score, 1)) * 100;
+      if (!matchesText([exam.student_name, exam.group_name, exam.exam_type, exam.level, exam.taken_at], values.query)) return false;
+      if (values.examType && exam.exam_type !== values.examType) return false;
+      if (values.level && (exam.level || "General") !== values.level) return false;
+      if (values.result === "pass" && percent < 60) return false;
+      if (values.result === "fail" && percent >= 60) return false;
+      return true;
+    }),
+    [exams, values],
+  );
+  const average = filtered.length
+    ? Math.round(filtered.reduce((sum, exam) => sum + (exam.score / Math.max(exam.max_score, 1)) * 100, 0) / filtered.length)
+    : 0;
   return (
     <>
       <PageHeading
@@ -1691,6 +2448,23 @@ function ExamsPage({ exams, onAdd, onDelete }: { exams: Exam[]; onAdd: () => voi
         subtitle="Track placement tests, unit tests and mock scores — spot trending students."
         action={<button className="primary-button" onClick={onAdd}><Plus size={17} /> Record exam</button>}
       />
+      <FilterBar>
+        <FilterSearch value={values.query} onChange={(value) => set("query", value)} placeholder="Student, group or exam…" />
+        <FilterSelect label="Exam type" value={values.examType} onChange={(value) => set("examType", value)} options={typeOptions} allLabel="All exams" />
+        <FilterSelect label="Level" value={values.level} onChange={(value) => set("level", value)} options={levelOptions} allLabel="All levels" />
+        <FilterSelect
+          label="Result"
+          value={values.result}
+          onChange={(value) => set("result", value)}
+          allLabel="Any score"
+          options={[
+            { value: "pass", label: "Passed (60%+)" },
+            { value: "fail", label: "Failed (<60%)" },
+          ]}
+        />
+        <FilterSpacer />
+        {active && <FilterReset onClick={reset} />}
+      </FilterBar>
       {levels.length > 0 && (
         <section className="panel page-panel"><PanelHead title="Level performance" subtitle="Average score by level" />
           <div className="permission-summary">
@@ -1703,7 +2477,10 @@ function ExamsPage({ exams, onAdd, onDelete }: { exams: Exam[]; onAdd: () => voi
         </section>
       )}
       <section className="panel table-panel page-panel">
-        <PanelHead title={`Results (${exams.length})`} subtitle="Most recent exams first" />
+        <PanelHead
+          title={panelCount("Results", filtered.length, exams.length, active)}
+          subtitle={active ? `Average score of the selection: ${average}%` : "Most recent exams first"}
+        />
         <div className="table-scroll">
           <table>
             <thead>
@@ -1717,7 +2494,7 @@ function ExamsPage({ exams, onAdd, onDelete }: { exams: Exam[]; onAdd: () => voi
               </tr>
             </thead>
             <tbody>
-              {exams.length ? exams.map((exam) => (
+              {filtered.map((exam) => (
                 <tr key={exam.id}>
                   <td><strong>{exam.student_name}</strong></td>
                   <td>{exam.exam_type}</td>
@@ -1726,7 +2503,8 @@ function ExamsPage({ exams, onAdd, onDelete }: { exams: Exam[]; onAdd: () => voi
                   <td>{exam.taken_at}</td>
                   <td className="row-actions"><button className="danger-button table-action" title="Delete" onClick={() => onDelete(exam)}><Trash2 size={14} /></button></td>
                 </tr>
-              )) : <tr><td colSpan={6}>No exam results yet. Record a placement test to start tracking progress.</td></tr>}
+              ))}
+              {!filtered.length && <FilterEmpty colSpan={6}>{active ? "No exam results match the current filters." : "No exam results yet. Record a placement test to start tracking progress."}</FilterEmpty>}
             </tbody>
           </table>
         </div>
@@ -1757,10 +2535,10 @@ function RoomsPage({ rooms, groups, onAdd, onEdit, onDelete }: { rooms: Room[]; 
               <span className="schedule-kind">{room.name}</span>
               <span className={`status-pill ${room.status === "Active" ? "paid" : "balance-due"}`}>{room.status}</span>
             </div>
-            <p className="schedule-course"><Building2 size={13} /> {room.location || "No location set"} · {room.capacity} seats</p>
+<p className="schedule-course"><Building2 size={13} /> {room.number ? `No. ${room.number} · ` : ""}{room.location || "No location set"} · {room.capacity} seats</p>
             <div className="schedule-meta">
               {room.groups?.length ? room.groups.map((group) => (
-                <div className="schedule-row" key={group.name}><DoorOpen size={15} /><span>Group</span><strong>{group.name} · {group.students_count}/{room.capacity}</strong></div>
+                <div className="schedule-row" key={group.name}><DoorOpen size={15} /><span>Group</span><strong className={group.students_count > room.capacity ? "room-over" : undefined}>{group.name} · {group.students_count}/{room.capacity}</strong></div>
               )) : <div className="schedule-row"><DoorOpen size={15} /><span>Group</span><strong>No group assigned</strong></div>}
             </div>
             <div className="row-actions">
@@ -1776,6 +2554,16 @@ function RoomsPage({ rooms, groups, onAdd, onEdit, onDelete }: { rooms: Room[]; 
 
 function MessagesPage({ messages, onSend, onDelete }: { messages: MessageItem[]; onSend: () => void; onDelete: (message: MessageItem) => void }) {
   const channels = { SMS: "teal", Telegram: "orange", WhatsApp: "blue" } as Record<string, string>;
+  const { values, set, reset, active } = useFilters({ query: "", channel: "" });
+  const channelOptions = useMemo(() => toOptions(messages.map((message) => message.channel)), [messages]);
+  const filtered = useMemo(
+    () => messages.filter((message) => {
+      if (!matchesText([message.recipient, message.subject, message.body, message.channel, message.created_at], values.query)) return false;
+      if (values.channel && message.channel !== values.channel) return false;
+      return true;
+    }),
+    [messages, values],
+  );
   return (
     <>
       <PageHeading
@@ -1784,10 +2572,16 @@ function MessagesPage({ messages, onSend, onDelete }: { messages: MessageItem[];
         subtitle="SMS, Telegram and WhatsApp notices sent to parents and students."
         action={<button className="primary-button" onClick={onSend}><Send size={16} /> Compose message</button>}
       />
+      <FilterBar>
+        <FilterSearch value={values.query} onChange={(value) => set("query", value)} placeholder="Recipient, subject or body…" />
+        <FilterSelect label="Channel" value={values.channel} onChange={(value) => set("channel", value)} options={channelOptions} allLabel="All channels" />
+        <FilterSpacer />
+        {active && <FilterReset onClick={reset} />}
+      </FilterBar>
       <section className="panel page-panel">
-        <PanelHead title="Outbox" subtitle={`${messages.length} sent messages`} />
+        <PanelHead title={panelCount("Outbox", filtered.length, messages.length, active)} subtitle="Messages sent to parents and students" />
         <div className="feed">
-          {messages.length ? messages.map((message) => (
+          {filtered.length ? filtered.map((message) => (
             <article key={message.id} className="feed-item">
               <div className={`stat-icon small ${channels[message.channel] ?? "teal"}`}><Send size={13} /></div>
               <div className="feed-body">
@@ -1801,7 +2595,7 @@ function MessagesPage({ messages, onSend, onDelete }: { messages: MessageItem[];
               </div>
               <button className="danger-button table-action" onClick={() => onDelete(message)}><Trash2 size={13} /></button>
             </article>
-          )) : <p className="muted">No messages yet.</p>}
+          )) : <p className="muted">{active ? "No messages match the current filters." : "No messages yet."}</p>}
         </div>
       </section>
     </>
@@ -1809,6 +2603,16 @@ function MessagesPage({ messages, onSend, onDelete }: { messages: MessageItem[];
 }
 
 function ActivityPage({ activity }: { activity: ActivityItem[] }) {
+  const { values, set, reset, active } = useFilters({ query: "", user: "" });
+  const userOptions = useMemo(() => toOptions(activity.map((item) => item.user_name)), [activity]);
+  const filtered = useMemo(
+    () => activity.filter((item) => {
+      if (!matchesText([item.user_name, item.action, item.target, item.created_at], values.query)) return false;
+      if (values.user && item.user_name !== values.user) return false;
+      return true;
+    }),
+    [activity, values],
+  );
   return (
     <>
       <PageHeading
@@ -1817,9 +2621,21 @@ function ActivityPage({ activity }: { activity: ActivityItem[] }) {
         subtitle="Every important action across the centre — who did what and when."
         action={<ShieldCheck size={20} />}
       />
+      <FilterBar>
+        <FilterSearch value={values.query} onChange={(value) => set("query", value)} placeholder="Action, target or person…" />
+        <FilterSelect label="Team member" value={values.user} onChange={(value) => set("user", value)} options={userOptions} allLabel="Everyone" />
+        <FilterSpacer />
+        {active && <FilterReset onClick={reset} />}
+      </FilterBar>
       <section className="panel page-panel">
+        <div className="panel-head">
+          <div>
+            <h2>{panelCount("Events", filtered.length, activity.length, active)}</h2>
+            <p className="muted">Newest first</p>
+          </div>
+        </div>
         <div className="feed">
-          {activity.length ? activity.map((item) => (
+          {filtered.length ? filtered.map((item) => (
             <article key={item.id} className="feed-item">
               <div className="avatar small">{item.user_name.split(" ").map((p) => p[0]).join("").slice(0, 2)}</div>
               <div className="feed-body">
@@ -1830,7 +2646,7 @@ function ActivityPage({ activity }: { activity: ActivityItem[] }) {
                 <p className="muted">{item.action} — {item.target}</p>
               </div>
             </article>
-          )) : <p className="muted">No activity recorded yet.</p>}
+          )) : <p className="muted">{active ? "No activity matches the current filters." : "No activity recorded yet."}</p>}
         </div>
       </section>
     </>
@@ -1852,6 +2668,23 @@ function StaffPage({ users, currentUser, roles, onCreate, onEdit, onEditPermissi
       </>
     );
   }
+  return <StaffDirectory users={users} currentUser={currentUser} roles={roles} onCreate={onCreate} onEdit={onEdit} onEditPermissions={onEditPermissions} onDelete={onDelete} />;
+}
+
+function StaffDirectory({ users, currentUser, roles, onCreate, onEdit, onEditPermissions, onDelete }: { users: UserAccount[]; currentUser: UserAccount | null; roles: StaffRole[]; onCreate: () => void; onEdit: (user: UserAccount) => void; onEditPermissions: (role: StaffRole) => void; onDelete: (user: UserAccount) => void }) {
+  const { values, set, reset, active } = useFilters({ query: "", role: "", kind: "" });
+  const roleOptions = useMemo(() => toOptions(users.map((user) => user.role_name)), [users]);
+  const filtered = useMemo(
+    () => users.filter((user) => {
+      if (!matchesText([user.name, user.phone, user.role_name], values.query)) return false;
+      if (values.role && user.role_name !== values.role) return false;
+      const isSystem = user.role_name === "Super Admin" || roles.some((role) => role.id === user.role_id && role.is_system === 1);
+      if (values.kind === "system" && !isSystem) return false;
+      if (values.kind === "custom" && isSystem) return false;
+      return true;
+    }),
+    [users, roles, values],
+  );
   const totalRoles = roles.length || new Set(users.map((user) => user.role_name)).size;
   return (
     <>
@@ -1861,6 +2694,22 @@ function StaffPage({ users, currentUser, roles, onCreate, onEdit, onEditPermissi
         subtitle="Manage your team — staff log in with their phone number and the password you set."
         action={<button className="primary-button" onClick={onCreate}><Plus size={17} /> Add staff</button>}
       />
+      <FilterBar>
+        <FilterSearch value={values.query} onChange={(value) => set("query", value)} placeholder="Name, phone or role…" />
+        <FilterSelect label="Role" value={values.role} onChange={(value) => set("role", value)} options={roleOptions} allLabel="All roles" />
+        <FilterSelect
+          label="Account type"
+          value={values.kind}
+          onChange={(value) => set("kind", value)}
+          allLabel="Any"
+          options={[
+            { value: "system", label: "System account" },
+            { value: "custom", label: "Created by director" },
+          ]}
+        />
+        <FilterSpacer />
+        {active && <FilterReset onClick={reset} />}
+      </FilterBar>
       <div className="stat-grid">
         <Stat
           label="Staff members"
@@ -1888,7 +2737,7 @@ function StaffPage({ users, currentUser, roles, onCreate, onEdit, onEditPermissi
         />
       </div>
       <section className="panel table-panel page-panel">
-        <PanelHead title={`Staff accounts (${users.length})`} subtitle="Sign in with the phone number shown here · Only the Main Director can manage staff" />
+        <PanelHead title={panelCount("Staff accounts", filtered.length, users.length, active)} subtitle="Sign in with the phone number shown here · Only the Main Director can manage staff" />
         <div className="table-scroll">
           <table>
             <thead>
@@ -1901,7 +2750,7 @@ function StaffPage({ users, currentUser, roles, onCreate, onEdit, onEditPermissi
               </tr>
             </thead>
             <tbody>
-              {users.length ? users.map((user) => (
+              {filtered.length ? filtered.map((user) => (
                 <tr key={user.id}>
                   <td><strong>{user.name}</strong>{user.id === currentUser?.id && <span className="status-pill paid">You</span>}</td>
                   <td>{user.phone || "No phone set"}</td>
@@ -1912,7 +2761,7 @@ function StaffPage({ users, currentUser, roles, onCreate, onEdit, onEditPermissi
                     <button className="danger-button table-action" title="Delete" onClick={() => onDelete(user)}><Trash2 size={15} /></button>
                   </td>
                 </tr>
-              )) : <tr><td colSpan={5} className="muted">No staff accounts yet — add your first team member.</td></tr>}
+              )) : <FilterEmpty colSpan={5}>{active ? "No staff accounts match the current filters." : "No staff accounts yet — add your first team member."}</FilterEmpty>}
             </tbody>
           </table>
         </div>
@@ -2148,13 +2997,13 @@ function SendMessageModal({ students, close, onSaved }: { students: Student[]; c
   const [error, setError] = useState("");
   const selected = students.find((student) => student.id === values.student_id);
   const recipient = selected ? (selected.parent_name || selected.name) : "";
-  return <div className="modal-backdrop"><form className="modal" onSubmit={async (event) => { event.preventDefault(); if (!recipient) { setError("Choose a student with a parent on file"); return; } const response = await fetch("/api/messages/send", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...values, recipient, subject: values.subject || "BrightPath notice" }) }); if (!response.ok) { setError((await response.json()).message ?? "Unable to send"); return; } onSaved(); }}><div className="modal-head"><div><p className="eyebrow">Communications</p><h2>Compose message</h2></div><button type="button" className="more-button" onClick={close}><X size={19} /></button></div><label>Student<select required value={values.student_id} onChange={(event) => setValues({ ...values, student_id: Number(event.target.value) })}><option value={0} disabled>Choose a student</option>{students.map((student) => <option key={student.id} value={student.id}>{student.name} · {student.parent_name ? `parent: ${student.parent_name}` : "no parent on file"}</option>)}</select></label><label>Channel<select value={values.channel} onChange={(event) => setValues({ ...values, channel: event.target.value })}><option>SMS</option><option>Telegram</option><option>WhatsApp</option></select></label><label>Subject<input value={values.subject} placeholder="BrightPath notice" onChange={(event) => setValues({ ...values, subject: event.target.value })} /></label><label>Message<textarea required rows={4} value={values.body} onChange={(event) => setValues({ ...values, body: event.target.value })} /></label>{recipient ? <p className="muted">Sending to {recipient}{selected?.parent_phone ? ` · ${selected.parent_phone}` : ""}</p> : null}{error && <p className="form-error">{error}</p>}<div className="modal-actions"><button type="button" className="secondary-button" onClick={close}>Cancel</button><button className="primary-button" type="submit"><Send size={15} /> Send</button></div></form></div>;
+  return <div className="modal-backdrop"><form className="modal" onSubmit={async (event) => { event.preventDefault(); if (!recipient) { setError("Choose a student with a parent on file"); return; } const response = await fetch("/api/messages/send", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...values, recipient, subject: values.subject || "Harry School notice" }) }); if (!response.ok) { setError((await response.json()).message ?? "Unable to send"); return; } onSaved(); }}><div className="modal-head"><div><p className="eyebrow">Communications</p><h2>Compose message</h2></div><button type="button" className="more-button" onClick={close}><X size={19} /></button></div><label>Student<select required value={values.student_id} onChange={(event) => setValues({ ...values, student_id: Number(event.target.value) })}><option value={0} disabled>Choose a student</option>{students.map((student) => <option key={student.id} value={student.id}>{student.name} · {student.parent_name ? `parent: ${student.parent_name}` : "no parent on file"}</option>)}</select></label><label>Channel<select value={values.channel} onChange={(event) => setValues({ ...values, channel: event.target.value })}><option>SMS</option><option>Telegram</option><option>WhatsApp</option></select></label><label>Subject<input value={values.subject} placeholder="Harry School notice" onChange={(event) => setValues({ ...values, subject: event.target.value })} /></label><label>Message<textarea required rows={4} value={values.body} onChange={(event) => setValues({ ...values, body: event.target.value })} /></label>{recipient ? <p className="muted">Sending to {recipient}{selected?.parent_phone ? ` · ${selected.parent_phone}` : ""}</p> : null}{error && <p className="form-error">{error}</p>}<div className="modal-actions"><button type="button" className="secondary-button" onClick={close}>Cancel</button><button className="primary-button" type="submit"><Send size={15} /> Send</button></div></form></div>;
 }
 
 function RoomEditModal({ room, close, onSaved }: { room: Room; close: () => void; onSaved: (room: Room) => void }) {
-  const [values, setValues] = useState({ name: room.name, capacity: String(room.capacity || 0), location: room.location, status: room.status });
+  const [values, setValues] = useState({ name: room.name, number: room.number || "", capacity: String(room.capacity || 0), location: room.location, status: room.status });
   const [error, setError] = useState("");
-  return <div className="modal-backdrop"><form className="modal" onSubmit={async (event) => { event.preventDefault(); const response = await fetch(`/api/rooms/${room.id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...values, capacity: Number(values.capacity) || 0 }) }); if (!response.ok) { setError((await response.json()).message ?? "Unable to update room"); return; } onSaved(await response.json()); }}><div className="modal-head"><div><p className="eyebrow">Operations</p><h2>Edit room</h2></div><button type="button" className="more-button" onClick={close}><X size={19} /></button></div><label>Room name<input required value={values.name} onChange={(event) => setValues({ ...values, name: event.target.value })} /></label><label>Capacity (seats)<input required type="number" min={1} value={values.capacity} onChange={(event) => setValues({ ...values, capacity: event.target.value })} /></label><label>Location<input value={values.location} onChange={(event) => setValues({ ...values, location: event.target.value })} /></label><label>Status<select value={values.status} onChange={(event) => setValues({ ...values, status: event.target.value })}><option>Active</option><option>Inactive</option></select></label>{error && <p className="form-error">{error}</p>}<div className="modal-actions"><button type="button" className="secondary-button" onClick={close}>Cancel</button><button className="primary-button" type="submit">Save changes</button></div></form></div>;
+  return <div className="modal-backdrop"><form className="modal" onSubmit={async (event) => { event.preventDefault(); const response = await fetch(`/api/rooms/${room.id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...values, capacity: Number(values.capacity) || 0 }) }); if (!response.ok) { setError((await response.json()).message ?? "Unable to update room"); return; } onSaved(await response.json()); }}><div className="modal-head"><div><p className="eyebrow">Operations</p><h2>Edit room</h2></div><button type="button" className="more-button" onClick={close}><X size={19} /></button></div><label>Room name<input required value={values.name} onChange={(event) => setValues({ ...values, name: event.target.value })} /></label><label>Room number<input value={values.number} onChange={(event) => setValues({ ...values, number: event.target.value })} placeholder="e.g. 101" /></label><label>Capacity (seats)<input required type="number" min={1} value={values.capacity} onChange={(event) => setValues({ ...values, capacity: event.target.value })} /></label><label>Location<input value={values.location} onChange={(event) => setValues({ ...values, location: event.target.value })} /></label><label>Status<select value={values.status} onChange={(event) => setValues({ ...values, status: event.target.value })}><option>Active</option><option>Inactive</option></select></label>{error && <p className="form-error">{error}</p>}<div className="modal-actions"><button type="button" className="secondary-button" onClick={close}>Cancel</button><button className="primary-button" type="submit">Save changes</button></div></form></div>;
 }
 
 export default App;

@@ -1,0 +1,25 @@
+.fx-bar{display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap;background:#f7faf9;border:1px solid #e4ece8;border-radius:10px;padding:12px 14px;margin-bottom:16px}
+.fx-field{display:flex;flex-direction:column;gap:5px;min-width:132px}
+.fx-label{font:700 9px 'Manrope';letter-spacing:.09em;text-transform:uppercase;color:#8b9d97}
+.fx-search-field{flex:1 1 210px;min-width:190px}
+.fx-select{border:1px solid #d9e7e1;border-radius:6px;padding:8px 10px;font:600 12px 'Manrope';color:#36594e;background:#fff;cursor:pointer;outline-color:#4a988a;min-width:132px}
+.fx-search{position:relative;display:flex;align-items:center}
+.fx-search input{width:100%;border:1px solid #d9e7e1;border-radius:6px;padding:8px 10px 8px 30px;font:500 12px 'Manrope';color:#36594e;background:#fff;outline-color:#4a988a}
+.fx-search input::placeholder{color:#a3b4ae}
+.fx-search svg{position:absolute;left:9px;top:50%;transform:translateY(-50%);color:#8ea9a0;pointer-events:none}
+.fx-chip-field{min-width:auto}
+.fx-chip-row{display:flex;gap:6px;flex-wrap:wrap}
+.fx-chip{border:1px solid #d9e7e1;border-radius:999px;padding:7px 12px;font:600 11px 'Manrope';color:#36594e;background:#fff;cursor:pointer;white-space:nowrap;display:inline-flex;align-items:center;gap:5px}
+.fx-chip:hover{background:#eef4f1}
+.fx-chip.on{background:#2b685c;border-color:#2b685c;color:#fff}
+.fx-chip.on:hover{background:#235649}
+.fx-chip.empty{opacity:.42;cursor:not-allowed}
+.fx-chip.empty:hover{background:#fff}
+.fx-chip-count{font-size:10px;opacity:.6;font-weight:700}
+.fx-chip.on .fx-chip-count{opacity:.8}
+.fx-reset{align-self:flex-end;border:1px solid #d9e7e1;border-radius:6px;background:#fff;color:#5d7b70;padding:8px 13px;font:600 11px 'Manrope';cursor:pointer;display:inline-flex;align-items:center;gap:6px;white-space:nowrap}
+.fx-reset:hover{background:#eef4f1;color:#2b685c}
+.fx-spacer{flex:1 1 auto;min-width:0}
+.fx-empty{padding:36px 20px;text-align:center;color:#8b9d97;font-size:12px}
+.fx-note{margin:-6px 0 18px;color:#8b9d97;font-size:11px}
+@media(max-width:900px){.fx-field{min-width:118px;flex:1 1 118px}.fx-select{min-width:0;width:100%}}

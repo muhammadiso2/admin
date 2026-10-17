@@ -491,6 +491,13 @@ function AttendanceTable({ group, dates, lessonOnly, rows, total, byDate, todayK
   return (
     <div className="am-scroll">
       <table className="am-grid">
+        {/* table-layout:fixed ignores cell min-width, so the column widths
+            must be declared here or the name column overlaps day 1. */}
+        <colgroup>
+          <col className="am-col-name" />
+          {dates.map((d) => <col key={d} className="am-col-day" />)}
+          {fullView && <col className="am-col-rate" />}
+        </colgroup>
         <thead>
           <tr>
             <th className="am-corner">

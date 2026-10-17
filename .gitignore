@@ -12,6 +12,16 @@ dist
 dist-ssr
 *.local
 
+# Environment
+.env
+.env.*
+!.env.example
+
+# Local database & backups (auto-created on server start)
+server/centre.sqlite
+server/backups/
+*.sqlite
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

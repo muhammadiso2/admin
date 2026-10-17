@@ -1,0 +1,8 @@
+.weather-canvas{position:fixed;inset:0;pointer-events:none;z-index:50}
+.weather-winter{background:linear-gradient(180deg,rgba(173,205,227,.14),rgba(255,255,255,0) 45%)}
+.weather-rain{background:linear-gradient(180deg,rgba(70,90,110,.12),rgba(70,90,110,.04))}
+.weather-autumn{background:linear-gradient(180deg,rgba(214,140,60,.08),rgba(255,255,255,0) 50%)}
+.theme-picker{display:flex;gap:6px;padding:6px 8px 10px}
+.theme-picker button{flex:1;border:1px solid #e2ebe7;background:#fff;border-radius:5px;padding:8px 4px;display:grid;justify-items:center;gap:4px;color:#49665d;font-size:9px;font-weight:700;letter-spacing:.4px;text-transform:uppercase}
+.theme-picker button:hover{border-color:#b9d4cb;background:#f4faf7}
+.theme-picker button.active{border-color:#377d72;background:#e3f1ec;color:#2b685c}

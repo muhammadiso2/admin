@@ -8,15 +8,25 @@ const require = createRequire(import.meta.url)
 const bcrypt = require('bcryptjs') as typeof import('bcryptjs')
 
 const root = path.dirname(fileURLToPath(import.meta.url))
-export const dbPath = path.join(root, 'centre.sqlite')
-export const backupsPath = path.join(root, 'backups')
+
+/** Data locations. Both are overridable so they can live on a Render persistent
+ *  disk (DB_PATH=/var/data/centre.sqlite) instead of the ephemeral repo dir.
+ *  With no env vars set they stay beside this file, which is what local dev wants. */
+export const dbPath = process.env.DB_PATH
+  ? path.resolve(process.env.DB_PATH)
+  : path.join(root, 'centre.sqlite')
+export const backupsPath = process.env.BACKUPS_PATH
+  ? path.resolve(process.env.BACKUPS_PATH)
+  : path.join(root, 'backups')
+
+fs.mkdirSync(path.dirname(dbPath), { recursive: true })
 let db = new Database(dbPath)
 db.pragma('foreign_keys = ON')
 
 export const modules = [
   'dashboard', 'students', 'groups', 'teachers', 'courses', 'schedule',
   'attendance', 'payments', 'receipts', 'reports', 'notifications', 'staff',
-  'activity', 'debts', 'invoices', 'exams', 'rooms', 'messages', 'system',
+  'activity', 'debts', 'billing', 'invoices', 'exams', 'rooms', 'messages', 'system',
 ]
 export const actions = ['view', 'create', 'edit', 'delete']
 
@@ -33,7 +43,7 @@ export function migrate() {
     CREATE TABLE IF NOT EXISTS roles (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE NOT NULL, description TEXT DEFAULT '', is_system INTEGER DEFAULT 0);
     CREATE TABLE IF NOT EXISTS permissions (id INTEGER PRIMARY KEY AUTOINCREMENT, module TEXT NOT NULL, action TEXT NOT NULL, UNIQUE(module, action));
     CREATE TABLE IF NOT EXISTS role_permissions (role_id INTEGER REFERENCES roles(id) ON DELETE CASCADE, permission_id INTEGER REFERENCES permissions(id) ON DELETE CASCADE, PRIMARY KEY(role_id, permission_id));
-    CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, email TEXT UNIQUE NOT NULL, phone TEXT UNIQUE, password_hash TEXT NOT NULL, role_id INTEGER REFERENCES roles(id), avatar TEXT DEFAULT '');
+    CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, email TEXT UNIQUE NOT NULL, phone TEXT UNIQUE, password_hash TEXT NOT NULL, role_id INTEGER REFERENCES roles(id), avatar TEXT DEFAULT '', must_change_password INTEGER DEFAULT 0);
     CREATE TABLE IF NOT EXISTS students (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, phone TEXT, parent_name TEXT DEFAULT '', parent_phone TEXT DEFAULT '', group_name TEXT, teacher_name TEXT DEFAULT '', level TEXT DEFAULT '', status TEXT DEFAULT 'Active', balance REAL DEFAULT 0, attendance REAL DEFAULT 0, joined_at TEXT DEFAULT CURRENT_DATE, group_assigned_at TEXT DEFAULT CURRENT_TIMESTAMP);
     CREATE TABLE IF NOT EXISTS teachers (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, subject TEXT, groups_count INTEGER DEFAULT 0, status TEXT DEFAULT 'Active');
     CREATE TABLE IF NOT EXISTS courses (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, level TEXT, monthly_fee REAL DEFAULT 0, students_count INTEGER DEFAULT 0, color TEXT DEFAULT '#377d72');
@@ -42,11 +52,18 @@ export function migrate() {
     CREATE TABLE IF NOT EXISTS attendance (id INTEGER PRIMARY KEY AUTOINCREMENT, group_id INTEGER NOT NULL, student_id INTEGER NOT NULL, attendance_date TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'not', UNIQUE(group_id, student_id, attendance_date));
     CREATE TABLE IF NOT EXISTS activity_log (id INTEGER PRIMARY KEY AUTOINCREMENT, user_name TEXT, action TEXT, target TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP);
     CREATE TABLE IF NOT EXISTS reports (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, message TEXT DEFAULT '', author TEXT DEFAULT '', priority TEXT DEFAULT 'normal', created_at TEXT DEFAULT CURRENT_TIMESTAMP, is_read INTEGER DEFAULT 0);
-    CREATE TABLE IF NOT EXISTS rooms (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE NOT NULL, capacity INTEGER DEFAULT 0, location TEXT DEFAULT '', status TEXT DEFAULT 'Active');
+    CREATE TABLE IF NOT EXISTS rooms (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE NOT NULL, capacity INTEGER DEFAULT 0, location TEXT DEFAULT '', status TEXT DEFAULT 'Active', number TEXT DEFAULT '');
     CREATE TABLE IF NOT EXISTS exams (id INTEGER PRIMARY KEY AUTOINCREMENT, student_id INTEGER NOT NULL, student_name TEXT DEFAULT '', group_name TEXT DEFAULT '', exam_type TEXT DEFAULT '', score REAL DEFAULT 0, max_score REAL DEFAULT 100, level TEXT DEFAULT '', taken_at TEXT DEFAULT CURRENT_DATE, note TEXT DEFAULT '');
     CREATE TABLE IF NOT EXISTS invoices (id INTEGER PRIMARY KEY AUTOINCREMENT, student_id INTEGER NOT NULL, student_name TEXT DEFAULT '', month TEXT NOT NULL, amount REAL DEFAULT 0, issue_date TEXT DEFAULT '', due_date TEXT DEFAULT '', status TEXT DEFAULT 'unpaid', created_at TEXT DEFAULT CURRENT_TIMESTAMP, UNIQUE(student_id, month));
     CREATE TABLE IF NOT EXISTS messages (id INTEGER PRIMARY KEY AUTOINCREMENT, recipient TEXT DEFAULT '', channel TEXT DEFAULT 'SMS', subject TEXT DEFAULT '', body TEXT DEFAULT '', status TEXT DEFAULT 'sent', created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+    CREATE TABLE IF NOT EXISTS bills (id INTEGER PRIMARY KEY AUTOINCREMENT, student_id INTEGER NOT NULL, student_name TEXT DEFAULT '', year INTEGER NOT NULL, month INTEGER NOT NULL, group_id INTEGER, group_name TEXT DEFAULT '', course_name TEXT DEFAULT '', monthly_price REAL DEFAULT 0, paid_amount REAL DEFAULT 0, remaining_amount REAL DEFAULT 0, status TEXT DEFAULT 'debtor', created_at TEXT DEFAULT CURRENT_TIMESTAMP, updated_at TEXT DEFAULT CURRENT_TIMESTAMP, UNIQUE(student_id, year, month));
+    CREATE INDEX IF NOT EXISTS idx_bills_month ON bills(year, month);
+    CREATE INDEX IF NOT EXISTS idx_bills_student ON bills(student_id);
   `)
+  const paymentColumns = tableColumns('payments')
+  if (!paymentColumns.includes('billing_id')) db.exec('ALTER TABLE payments ADD COLUMN billing_id INTEGER')
+  db.exec('CREATE INDEX IF NOT EXISTS idx_payments_billing ON payments(billing_id)')
+  db.exec("UPDATE payments SET student_id = (SELECT id FROM students WHERE name = payments.student_name) WHERE student_id IS NULL AND EXISTS (SELECT 1 FROM students WHERE name = payments.student_name)")
   const studentColumns = tableColumns('students')
   if (!studentColumns.includes('teacher_name')) db.exec("ALTER TABLE students ADD COLUMN teacher_name TEXT DEFAULT ''")
   if (!studentColumns.includes('level')) db.exec("ALTER TABLE students ADD COLUMN level TEXT DEFAULT ''")
@@ -60,10 +77,13 @@ export function migrate() {
   if (!groupColumns.includes('room_name')) db.exec("ALTER TABLE groups ADD COLUMN room_name TEXT DEFAULT ''")
   const courseColumns = tableColumns('courses')
   if (!courseColumns.includes('monthly_fee')) db.exec("ALTER TABLE courses ADD COLUMN monthly_fee REAL DEFAULT 0")
+  const roomColumns = tableColumns('rooms')
+  if (!roomColumns.includes('number')) db.exec("ALTER TABLE rooms ADD COLUMN number TEXT DEFAULT ''")
   db.exec("UPDATE students SET teacher_name = '' WHERE teacher_name <> '' AND teacher_name NOT IN (SELECT name FROM teachers)")
   db.exec("UPDATE groups SET teacher = '' WHERE teacher <> '' AND teacher NOT IN (SELECT name FROM teachers)")
   const userColumns = tableColumns('users')
   if (!userColumns.includes('phone')) db.exec("ALTER TABLE users ADD COLUMN phone TEXT")
+  if (!userColumns.includes('must_change_password')) db.exec("ALTER TABLE users ADD COLUMN must_change_password INTEGER DEFAULT 0")
   const attendanceColumns = tableColumns('attendance')
   if (!attendanceColumns.includes('marked_by')) db.exec("ALTER TABLE attendance ADD COLUMN marked_by TEXT DEFAULT ''")
   if (!attendanceColumns.includes('created_at')) db.exec("ALTER TABLE attendance ADD COLUMN created_at TEXT DEFAULT ''")
@@ -87,13 +107,25 @@ export function migrate() {
       for (const permission of permissionIds) addLink.run(role.lastInsertRowid, permission.id)
     }
   }
+  const teacherRole = db.prepare("SELECT id FROM roles WHERE name = 'Teacher'").get() as { id: number } | undefined
+  if (teacherRole) {
+    const addTeacherLink = db.prepare('INSERT OR IGNORE INTO role_permissions (role_id, permission_id) VALUES (?, ?)')
+    for (const permission of fullViewPermissions('Teacher')) addTeacherLink.run(teacherRole.id, permission.id)
+  }
+  db.exec(`
+    INSERT OR IGNORE INTO role_permissions (role_id, permission_id)
+    SELECT r.id, p.id FROM roles r, permissions p
+    WHERE p.module = 'billing' AND p.action IN ('view', 'create') AND r.name <> 'Teacher'
+    AND r.name <> 'Super Admin'
+  `)
   seedStaffAccounts()
+  flagDefaultPasswords()
   seedDemoData()
 }
 
 function fullViewPermissions(roleName: string): { id: number }[] {
   if (roleName === 'Teacher') {
-    const viewModules = ['dashboard', 'students', 'groups', 'schedule', 'attendance', 'exams']
+    const viewModules = ['dashboard', 'students', 'groups', 'schedule', 'attendance', 'rooms', 'exams']
     const checks = viewModules.map((module) => `(module = '${module}' AND action = 'view')`).join(' OR ')
     const ids = db.prepare(`SELECT id FROM permissions WHERE ${checks} OR (module = 'attendance' AND action = 'create')`).all() as { id: number }[]
     return ids
@@ -112,14 +144,30 @@ function ensureUser(name: string, phone: string, email: string, password: string
   const existing = db.prepare('SELECT id FROM (SELECT id, phone FROM users WHERE phone = ? UNION ALL SELECT id, email FROM users WHERE email = ?) LIMIT 1').all(phone, email)
   if (existing.length > 0) return
   const roleId = ensureRoleId(roleName)
-  const defaultEmail = email || `${phone.replace(/\D/g, '')}@brightpath.local`
+  const defaultEmail = email || `${phone.replace(/\D/g, '')}@harryschool.local`
   db.prepare('INSERT INTO users (name, email, phone, password_hash, role_id) VALUES (?, ?, ?, ?, ?)').run(name, defaultEmail, phone, bcrypt.hashSync(password, 10), roleId)
 }
 
 function seedStaffAccounts() {
-  ensureUser('Main Director', '+998900000000', 'director@brightpath.local', 'Director123!', 'Super Admin')
-  ensureUser('Madina Aliyeva', '+998911111111', 'madina@brightpath.local', 'Teacher123!', 'Teacher')
-  ensureUser('Sitora Nazarova', '+998922222222', 'sitora@brightpath.local', 'Cashier123!', 'Cashier')
+  ensureUser('Main Director', '+998900000000', 'director@harryschool.local', 'Director123!', 'Super Admin')
+  ensureUser('Madina Aliyeva', '+998911111111', 'madina@harryschool.local', 'Teacher123!', 'Teacher')
+  ensureUser('Sitora Nazarova', '+998922222222', 'sitora@harryschool.local', 'Cashier123!', 'Cashier')
+}
+
+const defaultSeedPasswords = [
+  ['+998900000000', 'Director123!'],
+  ['+998911111111', 'Teacher123!'],
+  ['+998922222222', 'Cashier123!'],
+]
+
+function flagDefaultPasswords() {
+  const users = db.prepare('SELECT id, phone, email, password_hash FROM users').all() as { id: number; phone: string | null; email: string; password_hash: string }[]
+  const flag = db.prepare('UPDATE users SET must_change_password = 1 WHERE id = ?')
+  for (const user of users) {
+    const phoneKey = (user.phone ?? '').replace(/\D/g, '')
+    const seed = defaultSeedPasswords.find(([phone]) => phone.replace(/\D/g, '') === phoneKey)
+    if (seed && bcrypt.compareSync(seed[1], user.password_hash)) flag.run(user.id)
+  }
 }
 
 function seedStamp(): string {
@@ -162,7 +210,7 @@ export function restoreBackup(name: string) {
 }
 
 export function resetDemoData() {
-  const tables = ['students', 'teachers', 'courses', 'groups', 'payments', 'attendance', 'reports', 'rooms', 'exams', 'invoices', 'messages', 'activity_log']
+  const tables = ['students', 'teachers', 'courses', 'groups', 'payments', 'attendance', 'reports', 'rooms', 'exams', 'invoices', 'bills', 'messages', 'activity_log']
   const run = db.transaction(() => {
     for (const table of tables) db.exec(`DELETE FROM ${table}`)
   })
@@ -207,8 +255,8 @@ function seedDemoData() {
     ;[['Amina Karimova', 1250000, 'Click', '2026-09-05'], ['Laylo Abdullayeva', 980000, 'Card', '2026-09-04'], ['Malika Yusupova', 850000, 'Payme', '2026-09-03']].forEach((payment) => addPayment.run(...payment))
   }
   if (seedTableEmpty('rooms')) {
-    const addRoom = db.prepare('INSERT INTO rooms (name, capacity, location, status) VALUES (?, ?, ?, ?)')
-    ;[['Room A', 20, 'Floor 1 · Main building', 'Active'], ['Room B', 18, 'Floor 1 · Main building', 'Active'], ['Room C', 24, 'Floor 2 · Main building', 'Active'], ['Computer Lab', 15, 'Floor 2 · Main building', 'Active']].forEach((room) => addRoom.run(...room))
+    const addRoom = db.prepare('INSERT INTO rooms (name, capacity, location, status, number) VALUES (?, ?, ?, ?, ?)')
+    ;[['Room A', 20, 'Floor 1 · Main building', 'Active', '101'], ['Room B', 18, 'Floor 1 · Main building', 'Active', '102'], ['Room C', 24, 'Floor 2 · Main building', 'Active', '201'], ['Computer Lab', 15, 'Floor 2 · Main building', 'Active', '202']].forEach((room) => addRoom.run(...room))
   }
   if (seedTableEmpty('exams')) {
     const addExam = db.prepare('INSERT INTO exams (student_id, student_name, group_name, exam_type, score, max_score, level, taken_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
@@ -221,7 +269,7 @@ function seedDemoData() {
   }
   if (seedTableEmpty('messages')) {
     const addMessage = db.prepare('INSERT INTO messages (recipient, channel, subject, body) VALUES (?, ?, ?, ?)')
-    addMessage.run('Dilnoza Karimova', 'SMS', 'Receipt #1', 'Payment of 1 250 000 UZS received for Amina. Thank you for choosing BrightPath.')
+    addMessage.run('Dilnoza Karimova', 'SMS', 'Receipt #1', 'Payment of 1 250 000 UZS received for Amina. Thank you for choosing Harry School.')
     addMessage.run('All students', 'Telegram', 'September schedule', 'A reminder that lessons resume this week. See the timetable for your group.')
   }
 }

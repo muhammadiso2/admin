@@ -57,6 +57,12 @@
 /* ── grid (table) ─────────────────────────────────────── */
 .am-grid{border-collapse:separate;border-spacing:0;width:100%;table-layout:fixed}
 .am-grid th,.am-grid td{box-sizing:border-box}
+/* Column widths must live on <col>. With table-layout:fixed the browser sizes
+   columns from these and IGNORES min-width on the cells — which used to make the
+   sticky name cell render 180px wide inside a 113px column, covering day 1. */
+.am-col-name{width:168px}
+.am-col-day{width:52px}
+.am-col-rate{width:56px}
 
 /* corner cell – sticky both */
 .am-corner{position:sticky;left:0;top:0;z-index:30;background:#f7faf8;border-bottom:1px solid #d9e7e1;border-right:1px solid #d9e7e1;padding:10px 12px;text-align:left}
@@ -64,7 +70,7 @@
 .am-corner-hint{font-size:9px;color:#b0c7be}
 
 /* date header cells – sticky top */
-.am-dh{position:sticky;top:0;z-index:20;background:#f7faf8;border-bottom:1px solid #d9e7e1;border-right:1px solid #d9e7e1;padding:8px 4px;text-align:center;min-width:52px}
+.am-dh{position:sticky;top:0;z-index:20;background:#f7faf8;border-bottom:1px solid #d9e7e1;border-right:1px solid #d9e7e1;padding:8px 4px;text-align:center;overflow:hidden}
 .am-dh .day{font:600 10px/1 'Manrope',sans-serif;color:#5a7972;margin-bottom:3px}
 .am-dh .dnum{font:700 14px/1 'Manrope',sans-serif;color:#36594e}
 .am-dh .wd{font-size:9px;color:#8ea9a0;margin-top:2px}
@@ -73,20 +79,20 @@
 .am-dh.weekend{opacity:.45}
 
 /* student name column – sticky left */
-.am-nc{position:sticky;left:0;z-index:10;background:#fff;border-bottom:1px solid #e8f0ec;border-right:1px solid #d9e7e1;padding:10px 10px 10px 12px;display:flex;align-items:center;gap:8px;min-width:180px;max-width:220px}
+.am-nc{position:sticky;left:0;z-index:10;background:#fff;border-bottom:1px solid #e8f0ec;border-right:1px solid #d9e7e1;padding:10px 10px 10px 12px;display:flex;align-items:center;gap:8px;overflow:hidden}
 .am-nc .avatar{width:28px;height:28px;border-radius:50%;background:#d8eae3;color:#286b5e;display:grid;place-items:center;font-size:9px;font-weight:700;flex:0 0 28px}
 .am-nc .nm{font-size:12px;font-weight:600;color:#36594e;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .am-row:hover .am-nc{background:#fafdfb}
 
 /* attendance cell */
-.am-cell{border-bottom:1px solid #f0f5f2;border-right:1px solid #f0f5f2;padding:6px 4px;text-align:center;min-width:52px;height:46px;cursor:pointer;position:relative}
+.am-cell{border-bottom:1px solid #f0f5f2;border-right:1px solid #f0f5f2;padding:6px 4px;text-align:center;height:46px;cursor:pointer;position:relative;overflow:hidden}
 .am-cell:hover{background:#f0faf4}
 .am-cell.weekend{background:#fafcfa}
 .am-cell.future{opacity:.35;pointer-events:none}
 .am-cell.today{background:#f5fbf7}
 
 /* attendance % corner (sticky top+right) */
-.am-pct-th{position:sticky;top:0;right:0;z-index:25;background:#f7faf8;border-bottom:1px solid #d9e7e1;border-left:1px solid #d9e7e1;padding:8px 6px;text-align:center;min-width:56px;font-size:10px;font-weight:700;color:#8ea9a0}
+.am-pct-th{position:sticky;top:0;right:0;z-index:25;background:#f7faf8;border-bottom:1px solid #d9e7e1;border-left:1px solid #d9e7e1;padding:8px 6px;text-align:center;font-size:10px;font-weight:700;color:#8ea9a0;overflow:hidden}
 
 /* badges */
 .am-badge{display:inline-flex;align-items:center;justify-content:center;border-radius:14px;padding:3px 10px;font-size:11px;font-weight:600;white-space:nowrap;line-height:1.4;min-width:44px;border:1.5px solid transparent}
@@ -98,7 +104,7 @@
 .am-cell-saving{opacity:.55;pointer-events:none}
 
 /* full-view attendance % col */
-.am-pct-col{position:sticky;right:0;z-index:10;background:#fff;border-bottom:1px solid #e8f0ec;border-left:1px solid #d9e7e1;padding:10px 10px;text-align:center;font:600 11px/1 'Manrope',sans-serif;color:#36594e;min-width:56px}
+.am-pct-col{position:sticky;right:0;z-index:10;background:#fff;border-bottom:1px solid #e8f0ec;border-left:1px solid #d9e7e1;padding:10px 6px;text-align:center;font:600 11px/1 'Manrope',sans-serif;color:#36594e;overflow:hidden}
 .am-pct-col .pct{font-size:13px;font-weight:800}
 .am-pct-col.high{color:#1d7a4b}.am-pct-col.mid{color:#b27a1d}.am-pct-col.low{color:#b04848}
 
@@ -144,5 +150,4 @@
   .am-toolbar{flex-direction:column;align-items:stretch}
   .am-nav{justify-content:flex-start}
   .am-search input{width:100%}
-  .am-nc{min-width:140px}
 }
